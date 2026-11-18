@@ -21,6 +21,21 @@ FREE_LIMIT = 3
 
 st.set_page_config(page_title="撮るだけ確定申告 Pro", layout="centered")
 
+# 販売用CSS：右上のメニュー・GitHub/Forkアイコン・下部ロゴを非表示（左上のサイドバー開閉ボタンは残す）
+st.markdown(
+    """
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    .stAppDeployButton {display: none;}
+    [data-testid="stToolbarActions"] {display: none;}
+    [data-testid="manage-app-button"] {display: none;}
+    [data-testid="stDecoration"] {display: none;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Secrets / 環境変数の安全な読み込み
 def get_secret(key: str, default: str = "") -> str:
     try:
@@ -40,12 +55,25 @@ if "processed_hashes" not in st.session_state:
     st.session_state.processed_hashes = set()
 if "is_pro" not in st.session_state:
     st.session_state.is_pro = False
+if "last_messages" not in st.session_state:
+    st.session_state.last_messages = []
+
+# 専用URL（?code=〇〇）による自動ロック解除
+try:
+    url_code = st.query_params.get("code", "")
+    if isinstance(url_code, list):
+        url_code = url_code[0] if url_code else ""
+    if url_code and url_code.strip() == PRO_PASSCODE:
+        st.session_state.is_pro = True
+except Exception:
+    pass
 
 # サイドバー：プラン管理・パスコード解除
 with st.sidebar:
     st.header("🔑 プラン・ロック解除")
     if st.session_state.is_pro:
         st.success("✅ Pro版（無制限）が有効です")
+        st.caption("📱 この画面をスマホの「ホーム画面に追加」しておくと、次回から1タップでPro版が開きます。")
     else:
         used_count = len(st.session_state.expenses_df)
         st.info(f"無料お試し中：{used_count} / {FREE_LIMIT} 枚")
@@ -55,7 +83,7 @@ with st.sidebar:
         if st.button("ロック解除", use_container_width=True):
             if input_code.strip() == PRO_PASSCODE:
                 st.session_state.is_pro = True
-                st.success("Pro版が有効になりました！")
+                st.query_params["code"] = PRO_PASSCODE
                 st.rerun()
             else:
                 st.error("パスコードが正しくありません。")
@@ -96,20 +124,20 @@ def analyze_receipt(client: genai.Client, model: str, file_bytes: bytes, mime_ty
     )
     return json.loads(response.text)
 
-def process_and_append(raw_bytes: bytes, is_pdf: bool = False):
+def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
     file_hash = hashlib.md5(raw_bytes).hexdigest()
     if file_hash in st.session_state.processed_hashes:
-        return
+        return False
 
     # 無料枠チェック
     if not st.session_state.is_pro and len(st.session_state.expenses_df) >= FREE_LIMIT:
         st.warning(f"無料お試しの上限（{FREE_LIMIT}枚）に達しました。続けて利用するにはPro版のパスコードを入力してください。")
         st.link_button("💳 Pro版を購入して無制限にする", STRIPE_URL, type="primary")
-        return
+        return False
 
     if not api_key:
         st.error("システムエラー：APIキーが設定されていません。管理者にお問い合わせください。")
-        return
+        return False
 
     with st.spinner("軽量化＆AI解析中..."):
         try:
@@ -133,24 +161,37 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False):
                 ignore_index=True
             )
             st.session_state.processed_hashes.add(file_hash)
-            st.success(f"✅ 登録完了：{new_row['取引先']} / ¥{new_row['金額']:,}（{new_row['勘定科目']}）")
+            st.session_state.last_messages.append(
+                f"✅ 登録完了：{new_row['取引先']} / ¥{new_row['金額']:,}（{new_row['勘定科目']}）"
+            )
+            return True
         except Exception as e:
             st.error(f"解析エラー: {e}")
+            return False
 
 tab1, tab2 = st.tabs(["📸 撮って即登録", "📊 集計・Excel出力"])
 
 with tab1:
+    # 直前の登録完了メッセージを表示してクリア
+    if st.session_state.last_messages:
+        for msg in st.session_state.last_messages:
+            st.success(msg)
+        st.session_state.last_messages = []
+
     remaining = FREE_LIMIT - len(st.session_state.expenses_df)
     if not st.session_state.is_pro:
         if remaining > 0:
             st.info(f"無料お試し：あと **{remaining} 枚** 登録できます（4枚目以降はPro版で無制限）")
         else:
-            st.warning("無料お試し枠（3枚）を使い切りました。左のメニュー（スマホは左上の「>」）からPro版へアップグレードしてください。")
+            st.warning("無料お試し枠（3枚）を使い切りました。左上の「>」からPro版へアップグレードしてください。")
             st.link_button("💳 Pro版を購入して無制限にする", STRIPE_URL, type="primary")
+    else:
+        st.caption("📱 最初にブラウザの共有メニューから「ホーム画面に追加」しておくと、次回からアプリのように1タップで開けます。")
 
     cam_img = st.camera_input("レシートを撮影")
     if cam_img is not None:
-        process_and_append(cam_img.getvalue(), is_pdf=False)
+        if process_and_append(cam_img.getvalue(), is_pdf=False):
+            st.rerun()
 
     st.markdown("---")
     up_files = st.file_uploader(
@@ -159,8 +200,12 @@ with tab1:
         accept_multiple_files=True,
     )
     if up_files:
+        added_any = False
         for f in up_files:
-            process_and_append(f.getvalue(), is_pdf=f.name.lower().endswith(".pdf"))
+            if process_and_append(f.getvalue(), is_pdf=f.name.lower().endswith(".pdf")):
+                added_any = True
+        if added_any:
+            st.rerun()
 
 with tab2:
     df = st.session_state.expenses_df
