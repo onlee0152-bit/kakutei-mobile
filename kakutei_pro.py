@@ -24,7 +24,7 @@ WARN_LIMIT_WITH_IMAGES = 150
 
 st.set_page_config(page_title="撮るだけ確定申告 Pro", layout="centered")
 
-# シンプルデザイン調整（タイトル縮小・右上メニュー非表示・集計表とボタン視認性）
+# デザイン調整（アイコンなし・上部余白短縮・撮影ボタン「撮影」化/太さ2倍/モニターと1行以上間隔）
 st.markdown(
     """
     <style>
@@ -34,15 +34,25 @@ st.markdown(
     [data-testid="stToolbarActions"] {display: none;}
     [data-testid="manage-app-button"] {display: none;}
     [data-testid="stDecoration"] {display: none;}
+    header[data-testid="stHeader"] {
+        height: 1.5rem;
+        min-height: 1.5rem;
+    }
+
+    .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 2.5rem !important;
+    }
 
     h1 {
-        font-size: 1.55rem !important;
-        line-height: 1.3 !important;
+        font-size: 1.45rem !important;
+        line-height: 1.25 !important;
+        margin-top: 0 !important;
         margin-bottom: 0.25rem !important;
     }
     h2, h3 {
-        font-size: 1.15rem !important;
-        margin-top: 1rem !important;
+        font-size: 1.12rem !important;
+        margin-top: 0.9rem !important;
         margin-bottom: 0.4rem !important;
     }
 
@@ -55,6 +65,32 @@ st.markdown(
     }
     div[data-testid="stVerticalBlockBorderWrapper"] {
         border-radius: 10px;
+    }
+
+    /* カメラモニターと撮影ボタンの間隔を1行以上確保 */
+    [data-testid="stCameraInput"] video,
+    [data-testid="stCameraInput"] canvas,
+    [data-testid="stCameraInput"] img {
+        margin-bottom: 1.35rem !important;
+    }
+    [data-testid="stCameraInput"] > div > div:last-child {
+        margin-top: 0.6rem !important;
+    }
+
+    /* 撮影ボタンの太さ（高さ）を約2倍にし、「Take Photo」を「撮影」に置換 */
+    [data-testid="stCameraInput"] button {
+        min-height: 4.8rem !important;
+        height: 4.8rem !important;
+        font-size: 0 !important;
+        line-height: 0 !important;
+        border-radius: 10px !important;
+        font-weight: 600 !important;
+    }
+    [data-testid="stCameraInput"] button::after {
+        content: "撮影";
+        font-size: 1.05rem !important;
+        line-height: 1.2 !important;
+        letter-spacing: 0.08em;
     }
     </style>
     """,
@@ -100,14 +136,14 @@ except Exception:
 
 # サイドバー：プラン管理・パスコード解除
 with st.sidebar:
-    st.header("🔑 プラン・ロック解除")
+    st.header("プラン・ロック解除")
     if st.session_state.is_pro:
-        st.success("✅ Pro版（無制限）が有効です")
-        st.caption("📱 この画面をスマホの「ホーム画面に追加」しておくと、次回から1タップでPro版が開きます。")
+        st.success("Pro版（無制限）が有効です")
+        st.caption("この画面をスマホの「ホーム画面に追加」しておくと、次回から1タップでPro版が開きます。")
     else:
         used_count = len(st.session_state.expenses_df)
         st.info(f"無料お試し中：{used_count} / {FREE_LIMIT} 枚")
-        st.link_button("💳 Pro版を購入して無制限にする", STRIPE_URL, type="primary", use_container_width=True)
+        st.link_button("Pro版を購入して無制限にする", STRIPE_URL, type="primary", use_container_width=True)
         st.markdown("---")
         input_code = st.text_input("購入後のパスコードを入力", type="password", placeholder="パスコード")
         if st.button("ロック解除", use_container_width=True):
@@ -119,9 +155,9 @@ with st.sidebar:
                 st.error("パスコードが正しくありません。")
 
     st.markdown("---")
-    st.caption("🔒 データは「すべてクリア」を押すまで保持されます。サーバーへの永続保存は行いません。")
+    st.caption("データは「すべてクリア」を押すまで保持されます。サーバーへの永続保存は行いません。")
 
-st.title("📸 撮るだけ確定申告 Pro")
+st.title("撮るだけ確定申告 Pro")
 st.caption("レシートを撮るだけでAIが勘定科目・税率・インボイス番号を自動仕分けし、確定申告用Excelを作成します。")
 
 def optimize_image(file_bytes: bytes, max_size: int = 1280) -> bytes:
@@ -174,14 +210,14 @@ def render_capacity_notice(total_count: int, image_count: int, keep_images: bool
     if total_count >= limit:
         if has_images:
             st.warning(
-                f"📦 登録データが **{total_count}件**（画像 **{image_count}枚**）になりました。"
-                "動作を軽く保つため、一度「📊 集計・Excel出力」タブでExcelと画像ZIPをダウンロードし、"
+                f"登録データが {total_count}件（画像 {image_count}枚）になりました。"
+                "動作を軽く保つため、一度「集計・Excel出力」タブでExcelと画像ZIPをダウンロードし、"
                 "「すべてクリア」で整理するのがおすすめです。"
             )
         else:
             st.warning(
-                f"📦 登録データが **{total_count}件** になりました。"
-                "動作を軽く保つため、一度「📊 集計・Excel出力」タブでExcelをダウンロードし、"
+                f"登録データが {total_count}件 になりました。"
+                "動作を軽く保つため、一度「集計・Excel出力」タブでExcelをダウンロードし、"
                 "「すべてクリア」で整理するのがおすすめです。"
             )
 
@@ -192,7 +228,7 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
 
     if not st.session_state.is_pro and len(st.session_state.expenses_df) >= FREE_LIMIT:
         st.warning(f"無料お試しの上限（{FREE_LIMIT}枚）に達しました。続けて利用するにはPro版のパスコードを入力してください。")
-        st.link_button("💳 Pro版を購入して無制限にする", STRIPE_URL, type="primary")
+        st.link_button("Pro版を購入して無制限にする", STRIPE_URL, type="primary")
         return False
 
     if not api_key:
@@ -239,14 +275,14 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
             )
             st.session_state.processed_hashes.add(file_hash)
             st.session_state.last_messages.append(
-                f"✅ 登録完了：{new_row['取引先']} / ¥{new_row['金額']:,}（{new_row['勘定科目']}）"
+                f"登録完了：{new_row['取引先']} / ¥{new_row['金額']:,}（{new_row['勘定科目']}）"
             )
             return True
         except Exception as e:
             st.error(f"解析エラー: {e}")
             return False
 
-tab1, tab2 = st.tabs(["📸 撮って即登録", "📊 集計・Excel出力"])
+tab1, tab2 = st.tabs(["撮って即登録", "集計・Excel出力"])
 
 with tab1:
     if st.session_state.last_messages:
@@ -263,15 +299,15 @@ with tab1:
     remaining = FREE_LIMIT - len(st.session_state.expenses_df)
     if not st.session_state.is_pro:
         if remaining > 0:
-            st.info(f"無料お試し：あと **{remaining} 枚** 登録できます（4枚目以降はPro版で無制限）")
+            st.info(f"無料お試し：あと {remaining} 枚 登録できます（4枚目以降はPro版で無制限）")
         else:
             st.warning("無料お試し枠（3枚）を使い切りました。左上の「>」からPro版へアップグレードしてください。")
-            st.link_button("💳 Pro版を購入して無制限にする", STRIPE_URL, type="primary")
+            st.link_button("Pro版を購入して無制限にする", STRIPE_URL, type="primary")
     else:
-        st.caption("📱 ブラウザの共有メニューから「ホーム画面に追加」しておくと、次回から1タップで開けます。")
+        st.caption("ブラウザの共有メニューから「ホーム画面に追加」しておくと、次回から1タップで開けます。")
 
     keep_img_toggle = st.toggle(
-        "🗂️ 軽量化したレシート画像もZIP用に保管する（目安：150件まで / オフ時は300件まで）",
+        "軽量化したレシート画像もZIP用に保管する（目安：150件まで / オフ時は300件まで）",
         value=st.session_state.keep_light_images,
     )
     if keep_img_toggle != st.session_state.keep_light_images:
@@ -313,11 +349,11 @@ with tab2:
         cached = st.session_state.cached_excel
         with st.container(border=True):
             st.caption(
-                f"💾 一時保管中のExcelあり（作成：{cached['saved_at']} / {cached['count']}件）。"
+                f"一時保管中のExcelあり（作成：{cached['saved_at']} / {cached['count']}件）。"
                 "ダウンロードに失敗した場合や再取得したい場合はこちらからどうぞ。"
             )
             st.download_button(
-                label=f"📥 一時保管中のExcelを再ダウンロード（{cached['filename']}）",
+                label=f"一時保管中のExcelを再ダウンロード（{cached['filename']}）",
                 data=cached["bytes"],
                 file_name=cached["filename"],
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -325,9 +361,9 @@ with tab2:
             )
 
     if df.empty:
-        st.info("まだ登録されたレシートがありません。「📸 撮って即登録」から撮影またはアップロードしてください。")
+        st.info("まだ登録されたレシートがありません。「撮って即登録」から撮影またはアップロードしてください。")
     else:
-        st.subheader(f"📝 経費明細の確認・修正（全 {len(df)} 件）")
+        st.subheader(f"経費明細の確認・修正（全 {len(df)} 件）")
         edited_df = st.data_editor(
             df,
             num_rows="dynamic",
@@ -349,7 +385,7 @@ with tab2:
         summary_df = pd.concat([summary_df, total_row], ignore_index=True)
 
         # 「勘定科目別 集計」タイトルの直下に集計表を配置
-        st.subheader("📊 勘定科目別 集計")
+        st.subheader("勘定科目別 集計")
         st.dataframe(
             summary_df,
             use_container_width=True,
@@ -371,7 +407,7 @@ with tab2:
         }
 
         st.download_button(
-            label="📥 確定申告用 Excel (.xlsx) をダウンロード",
+            label="確定申告用 Excel (.xlsx) をダウンロード",
             data=excel_bytes,
             file_name=excel_filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -384,7 +420,7 @@ with tab2:
             zip_bytes = build_images_zip(st.session_state.light_images)
             zip_filename = f"receipt_images_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
             st.download_button(
-                label=f"🗂️ 軽量化レシート画像をまとめて保存（{len(st.session_state.light_images)}枚・ZIP）",
+                label=f"軽量化レシート画像をまとめて保存（{len(st.session_state.light_images)}枚・ZIP）",
                 data=zip_bytes,
                 file_name=zip_filename,
                 mime="application/zip",
@@ -392,7 +428,7 @@ with tab2:
             )
 
         st.markdown("---")
-        if st.button("🗑️ 現在のデータをすべてクリア"):
+        if st.button("現在のデータをすべてクリア"):
             st.session_state.expenses_df = pd.DataFrame(columns=COLUMNS)
             st.session_state.processed_hashes = set()
             st.session_state.light_images = []
