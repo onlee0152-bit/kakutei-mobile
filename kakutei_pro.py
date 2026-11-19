@@ -92,7 +92,47 @@ st.markdown(
         line-height: 1.2 !important;
         letter-spacing: 0.08em;
     }
-    </style>
+
+    /* モバイル画面：カメラディスプレイを広げて案内文・映像・撮影ボタンを収まりやすく */
+    @media (max-width: 768px) {
+        .block-container {
+            padding-top: 0.6rem !important;
+            padding-left: 0.65rem !important;
+            padding-right: 0.65rem !important;
+            padding-bottom: 1.5rem !important;
+        }
+        h1 {
+            font-size: 1.25rem !important;
+            margin-bottom: 0.15rem !important;
+        }
+        [data-testid="stCameraInput"] {
+            width: 100% !important;
+            margin-top: 0.25rem !important;
+            margin-bottom: 0.5rem !important;
+        }
+        [data-testid="stCameraInput"] > label {
+            margin-bottom: 0.35rem !important;
+            font-size: 0.88rem !important;
+            line-height: 1.3 !important;
+        }
+        [data-testid="stCameraInput"] video,
+        [data-testid="stCameraInput"] canvas,
+        [data-testid="stCameraInput"] img {
+            width: 100% !important;
+            min-height: 46vh !important;
+            max-height: 56vh !important;
+            margin-bottom: 0.75rem !important;
+            object-fit: cover !important;
+        }
+        [data-testid="stCameraInput"] > div > div:last-child {
+            margin-top: 0.25rem !important;
+        }
+        [data-testid="stCameraInput"] button {
+            min-height: 4.2rem !important;
+            height: 4.2rem !important;
+        }
+    }
+</style>
     """,
     unsafe_allow_html=True,
 )
