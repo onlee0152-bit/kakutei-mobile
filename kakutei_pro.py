@@ -93,21 +93,22 @@ st.markdown(
         letter-spacing: 0.08em;
     }
 
-    /* モバイル画面：カメラ映像を縦長にし、横幅の余白も比率に合わせて調整 */
+    /* モバイル画面：カメラ表示を縦長にし、横幅の余白も比率に合わせて調整 */
     @media (max-width: 768px) {
-        .block-container {
-            padding-left: 0.85rem !important;
-            padding-right: 0.85rem !important;
-        }
         [data-testid="stCameraInput"] {
             width: 100% !important;
+            padding-left: 1rem !important;
+            padding-right: 1rem !important;
+            box-sizing: border-box !important;
         }
+        [data-testid="stCameraInput"] iframe,
         [data-testid="stCameraInput"] video,
         [data-testid="stCameraInput"] canvas,
         [data-testid="stCameraInput"] img {
             width: 100% !important;
-            height: 58vh !important;
-            min-height: 380px !important;
+            height: 55vh !important;
+            min-height: 360px !important;
+            max-height: 65vh !important;
             object-fit: cover !important;
             border-radius: 10px !important;
         }
