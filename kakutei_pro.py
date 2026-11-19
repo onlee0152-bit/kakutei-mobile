@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import os
+import time
 import zipfile
 from datetime import datetime
 import pandas as pd
@@ -10,6 +11,7 @@ from PIL import Image, ImageEnhance, ImageOps
 import pillow_heif
 from google import genai
 from google.genai import types
+from google.genai.errors import APIError
 
 pillow_heif.register_heif_opener()
 
@@ -24,7 +26,7 @@ WARN_LIMIT_WITH_IMAGES = 150
 
 st.set_page_config(page_title="撮るだけ確定申告 Pro", layout="centered")
 
-# デザイン調整（元のまま維持）
+# デザイン調整（アイコンなし・上部余白短縮・撮影ボタン「撮影」化/太さ2倍/モニターと1行以上間隔）
 st.markdown(
     """
     <style>
@@ -110,6 +112,12 @@ PRO_PASSCODE = get_secret("PRO_PASSCODE", "KAKUTEI2026")
 STRIPE_URL = get_secret("STRIPE_URL", "https://buy.stripe.com/test_your_link_here")
 MODEL_NAME = get_secret("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
+FALLBACK_MODELS = [
+    MODEL_NAME,
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+]
+
 # セッション状態の初期化（クリアを押すまで保持）
 if "expenses_df" not in st.session_state:
     st.session_state.expenses_df = pd.DataFrame(columns=COLUMNS)
@@ -191,12 +199,31 @@ def analyze_receipt(client: genai.Client, model: str, file_bytes: bytes, mime_ty
     - インボイス番号: Tから始まる13桁の番号（なければ空文字）
     - 備考: 品目や用途の要約（20文字以内）
     """
-    response = client.models.generate_content(
-        model=model,
-        contents=[types.Part.from_bytes(data=file_bytes, mime_type=mime_type), prompt],
-        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
-    )
-    return json.loads(response.text)
+    candidates = []
+    for m in [model] + FALLBACK_MODELS:
+        if m and m not in candidates:
+            candidates.append(m)
+
+    last_err = None
+    for m in candidates:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=m,
+                    contents=[types.Part.from_bytes(data=file_bytes, mime_type=mime_type), prompt],
+                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
+                )
+                return json.loads(response.text)
+            except APIError as e:
+                last_err = e
+                if getattr(e, "code", None) == 503 or "503" in str(e) or "UNAVAILABLE" in str(e):
+                    time.sleep(1.2 * (attempt + 1))
+                    continue
+                raise
+            except Exception as e:
+                last_err = e
+                raise
+    raise last_err
 
 
 def build_excel_bytes(detail_df: pd.DataFrame, summary_df: pd.DataFrame) -> bytes:
@@ -228,7 +255,6 @@ def make_summary_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def sync_export_cache():
-    """登録・変更時にExcelとZIPを事前生成して保持（ダウンロード時の再生成・消失を防止）"""
     df = st.session_state.expenses_df
     if df.empty:
         st.session_state.cached_excel = None
@@ -335,7 +361,6 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
 
 
 def mark_downloaded(msg: str):
-    """ダウンロードボタンを押してもデータは消さず、案内だけ記録"""
     st.session_state.downloaded_info = msg
 
 
