@@ -21,7 +21,7 @@ FREE_LIMIT = 3
 
 st.set_page_config(page_title="撮るだけ確定申告 Pro", layout="centered")
 
-# 販売用CSS：右上のメニュー・GitHub/Forkアイコン・下部ロゴを非表示（左上のサイドバー開閉ボタンは残す）
+# シンプルで違和感のない微調整CSS（右上メニュー・フッター非表示＋ボタン角丸の自然な調整）
 st.markdown(
     """
     <style>
@@ -31,6 +31,13 @@ st.markdown(
     [data-testid="stToolbarActions"] {display: none;}
     [data-testid="manage-app-button"] {display: none;}
     [data-testid="stDecoration"] {display: none;}
+
+    .stButton > button, .stDownloadButton > button, .stLinkButton > a {
+        border-radius: 8px;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        border-radius: 10px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -57,6 +64,12 @@ if "is_pro" not in st.session_state:
     st.session_state.is_pro = False
 if "last_messages" not in st.session_state:
     st.session_state.last_messages = []
+if "save_light_image" not in st.session_state:
+    st.session_state.save_light_image = False
+if "latest_light_image" not in st.session_state:
+    st.session_state.latest_light_image = None  # {"bytes": ..., "filename": ...}
+if "cached_excel" not in st.session_state:
+    st.session_state.cached_excel = None  # {"bytes": ..., "filename": ..., "count": ..., "saved_at": ...}
 
 # 専用URL（?code=〇〇）による自動ロック解除
 try:
@@ -89,7 +102,7 @@ with st.sidebar:
                 st.error("パスコードが正しくありません。")
 
     st.markdown("---")
-    st.caption("🔒 プライバシー保護：アップロードされた画像と集計データはサーバーに一切保存されず、画面を閉じると完全に消去されます。")
+    st.caption("🔒 プライバシー保護：画像と集計データはサーバーに永続保存されません。ダウンロード操作を行うまで画面上のデータは保持されます。")
 
 st.title("📸 撮るだけ確定申告 Pro")
 st.caption("レシートを撮るだけでAIが勘定科目・税率・インボイス番号を自動仕分けし、確定申告用Excelを作成します。")
@@ -124,6 +137,13 @@ def analyze_receipt(client: genai.Client, model: str, file_bytes: bytes, mime_ty
     )
     return json.loads(response.text)
 
+def build_excel_bytes(detail_df: pd.DataFrame, summary_df: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        detail_df.to_excel(writer, index=False, sheet_name="経費明細")
+        summary_df.to_excel(writer, index=False, sheet_name="勘定科目別集計")
+    return output.getvalue()
+
 def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
     file_hash = hashlib.md5(raw_bytes).hexdigest()
     if file_hash in st.session_state.processed_hashes:
@@ -141,13 +161,26 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
 
     with st.spinner("軽量化＆AI解析中..."):
         try:
-            send_bytes = raw_bytes if is_pdf else optimize_image(raw_bytes)
-            mime_type = "application/pdf" if is_pdf else "image/jpeg"
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            if is_pdf:
+                send_bytes = raw_bytes
+                mime_type = "application/pdf"
+            else:
+                send_bytes = optimize_image(raw_bytes)
+                mime_type = "image/jpeg"
+                if st.session_state.save_light_image:
+                    st.session_state.latest_light_image = {
+                        "bytes": send_bytes,
+                        "filename": f"receipt_light_{stamp}.jpg",
+                    }
+
             client = genai.Client(api_key=api_key)
             res = analyze_receipt(client, MODEL_NAME, send_bytes, mime_type)
 
             new_row = {
-                "登録日時": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "登録日時": now_str,
                 "発生日": res.get("発生日", ""),
                 "取引先": res.get("取引先", ""),
                 "勘定科目": res.get("勘定科目", "雑費"),
@@ -178,6 +211,21 @@ with tab1:
             st.success(msg)
         st.session_state.last_messages = []
 
+    # 軽量化画像をiPhone等に保存するかどうかのチェックボックス
+    st.checkbox(
+        "軽量化したレシート画像（JPEG）を保存する",
+        key="save_light_image",
+        help="オンにすると、解析後に軽量化された画像を保存ボタンからダウンロードできます。",
+    )
+
+    if st.session_state.save_light_image and st.session_state.latest_light_image is not None:
+        st.download_button(
+            label=f"🖼️ 軽量化画像を保存（{st.session_state.latest_light_image['filename']}）",
+            data=st.session_state.latest_light_image["bytes"],
+            file_name=st.session_state.latest_light_image["filename"],
+            mime="image/jpeg",
+        )
+
     remaining = FREE_LIMIT - len(st.session_state.expenses_df)
     if not st.session_state.is_pro:
         if remaining > 0:
@@ -186,7 +234,7 @@ with tab1:
             st.warning("無料お試し枠（3枚）を使い切りました。左上の「>」からPro版へアップグレードしてください。")
             st.link_button("💳 Pro版を購入して無制限にする", STRIPE_URL, type="primary")
     else:
-        st.caption("📱 最初にブラウザの共有メニューから「ホーム画面に追加」しておくと、次回からアプリのように1タップで開けます。")
+        st.caption("📱 ブラウザの共有メニューから「ホーム画面に追加」しておくと、次回から1タップで開けます。")
 
     cam_img = st.camera_input("レシートを撮影")
     if cam_img is not None:
@@ -209,6 +257,23 @@ with tab1:
 
 with tab2:
     df = st.session_state.expenses_df
+
+    # ダウンロード失敗・やり直し用の「一時保管中Excel」リカバリ枠
+    if st.session_state.cached_excel is not None:
+        cached = st.session_state.cached_excel
+        with st.container(border=True):
+            st.caption(
+                f"💾 一時保管中のExcelあり（作成：{cached['saved_at']} / {cached['count']}件）。"
+                "ダウンロードに失敗した場合や再取得したい場合はこちらからどうぞ。"
+            )
+            st.download_button(
+                label=f"📥 一時保管中のExcelを再ダウンロード（{cached['filename']}）",
+                data=cached["bytes"],
+                file_name=cached["filename"],
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="redownload_cached_excel",
+            )
+
     if df.empty:
         st.info("まだ登録されたレシートがありません。「📸 撮って即登録」から撮影またはアップロードしてください。")
     else:
@@ -236,22 +301,31 @@ with tab2:
         st.subheader("📊 勘定科目別 集計（確定申告・収支内訳書用）")
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            edited_df.to_excel(writer, index=False, sheet_name="経費明細")
-            summary_df.to_excel(writer, index=False, sheet_name="勘定科目別集計")
+        excel_bytes = build_excel_bytes(edited_df, summary_df)
+        excel_filename = f"kakutei_shinkoku_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+
+        # セッション内に一時保管（ダウンロード後も明細は自動消去しない）
+        st.session_state.cached_excel = {
+            "bytes": excel_bytes,
+            "filename": excel_filename,
+            "count": len(edited_df),
+            "saved_at": datetime.now().strftime("%H:%M:%S"),
+        }
 
         st.download_button(
             label="📥 確定申告用 Excel (.xlsx) をダウンロード",
-            data=output.getvalue(),
-            file_name="kakutei_shinkoku_pro.xlsx",
+            data=excel_bytes,
+            file_name=excel_filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
+            key="main_download_excel",
         )
 
+        st.markdown("---")
         if st.button("🗑️ 現在のデータをすべてクリア"):
             st.session_state.expenses_df = pd.DataFrame(columns=COLUMNS)
             st.session_state.processed_hashes = set()
+            st.session_state.latest_light_image = None
             st.rerun()
 
 st.markdown("---")
