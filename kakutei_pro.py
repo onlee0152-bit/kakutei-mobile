@@ -112,12 +112,6 @@ PRO_PASSCODE = get_secret("PRO_PASSCODE", "KAKUTEI2026")
 STRIPE_URL = get_secret("STRIPE_URL", "https://buy.stripe.com/test_your_link_here")
 MODEL_NAME = get_secret("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
-FALLBACK_MODELS = [
-    MODEL_NAME,
-    "gemini-3.1-flash-lite",
-    "gemini-3.8-flash",
-]
-
 # セッション状態の初期化（クリアを押すまで保持）
 if "expenses_df" not in st.session_state:
     st.session_state.expenses_df = pd.DataFrame(columns=COLUMNS)
@@ -199,35 +193,23 @@ def analyze_receipt(client: genai.Client, model: str, file_bytes: bytes, mime_ty
     - インボイス番号: Tから始まる13桁の番号（なければ空文字）
     - 備考: 品目や用途の要約（20文字以内）
     """
-    candidates = []
-    for m in [model] + FALLBACK_MODELS:
-        if m and m not in candidates:
-            candidates.append(m)
-
-    last_err = None
-    for m in candidates:
-        for attempt in range(2):
-            try:
-                response = client.models.generate_content(
-                    model=m,
-                    contents=[types.Part.from_bytes(data=file_bytes, mime_type=mime_type), prompt],
-                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
-                )
-                return json.loads(response.text)
-            except APIError as e:
-                last_err = e
-                code = getattr(e, "code", None)
-                msg = str(e)
-                if code == 404 or "404" in msg or "NOT_FOUND" in msg:
-                    break
-                if code == 503 or "503" in msg or "UNAVAILABLE" in msg:
-                    time.sleep(1.0 * (attempt + 1))
-                    continue
-                raise
-            except Exception as e:
-                last_err = e
-                raise
-    raise last_err
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=[types.Part.from_bytes(data=file_bytes, mime_type=mime_type), prompt],
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
+        )
+        return json.loads(response.text)
+    except APIError as e:
+        if getattr(e, "code", None) == 503 or "503" in str(e) or "UNAVAILABLE" in str(e):
+            time.sleep(0.6)
+            response = client.models.generate_content(
+                model=model,
+                contents=[types.Part.from_bytes(data=file_bytes, mime_type=mime_type), prompt],
+                config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
+            )
+            return json.loads(response.text)
+        raise
 
 
 def build_excel_bytes(detail_df: pd.DataFrame, summary_df: pd.DataFrame) -> bytes:
@@ -357,6 +339,7 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
             sync_export_cache()
             st.session_state.last_messages.append(
                 f"登録完了：{new_row['取引先']} / ¥{new_row['金額']:,}（{new_row['勘定科目']}）"
+                f"（現在 {len(st.session_state.expenses_df)} 件登録中）"
             )
             return True
         except Exception as e:
@@ -371,11 +354,6 @@ def mark_downloaded(msg: str):
 tab1, tab2 = st.tabs(["撮って即登録", "集計・Excel出力"])
 
 with tab1:
-    if st.session_state.last_messages:
-        for msg in st.session_state.last_messages:
-            st.success(msg)
-        st.session_state.last_messages = []
-
     render_capacity_notice(
         total_count=len(st.session_state.expenses_df),
         image_count=len(st.session_state.light_images),
@@ -407,6 +385,13 @@ with tab1:
     if cam_img is not None:
         if process_and_append(cam_img.getvalue(), is_pdf=False):
             st.rerun()
+
+    # 撮影ボタンのすぐ下に登録結果・案内を表示
+    if st.session_state.last_messages:
+        for msg in st.session_state.last_messages:
+            st.success(msg)
+        st.caption("続けて次を撮影するか、上の「集計・Excel出力」タブから確認・保存できます。")
+        st.session_state.last_messages = []
 
     st.markdown("---")
     up_files = st.file_uploader(
