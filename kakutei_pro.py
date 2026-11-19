@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import os
+import zipfile
 from datetime import datetime
 import pandas as pd
 import streamlit as st
@@ -21,7 +22,7 @@ FREE_LIMIT = 3
 
 st.set_page_config(page_title="撮るだけ確定申告 Pro", layout="centered")
 
-# シンプルで違和感のないデザイン調整（タイトル縮小・右上メニュー非表示・表とボタンの視認性調整）
+# シンプルデザイン調整（タイトル縮小・右上メニュー非表示・集計表とボタン視認性）
 st.markdown(
     """
     <style>
@@ -32,7 +33,6 @@ st.markdown(
     [data-testid="manage-app-button"] {display: none;}
     [data-testid="stDecoration"] {display: none;}
 
-    /* メインタイトルが大きすぎないよう調整 */
     h1 {
         font-size: 1.55rem !important;
         line-height: 1.3 !important;
@@ -44,7 +44,6 @@ st.markdown(
         margin-bottom: 0.4rem !important;
     }
 
-    /* 集計テーブルの文字サイズを少し大きくして見やすく */
     [data-testid="stDataFrame"] table {
         font-size: 0.95rem !important;
     }
@@ -60,7 +59,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Secrets / 環境変数の安全な読み込み
 def get_secret(key: str, default: str = "") -> str:
     try:
         return st.secrets.get(key, os.environ.get(key, default))
@@ -72,7 +70,7 @@ PRO_PASSCODE = get_secret("PRO_PASSCODE", "KAKUTEI2026")
 STRIPE_URL = get_secret("STRIPE_URL", "https://buy.stripe.com/test_your_link_here")
 MODEL_NAME = get_secret("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
-# セッション状態の初期化（ユーザーごとに完全分離・ダウンロード/クリアまで保持）
+# セッション状態の初期化（クリアを押すまで保持）
 if "expenses_df" not in st.session_state:
     st.session_state.expenses_df = pd.DataFrame(columns=COLUMNS)
 if "processed_hashes" not in st.session_state:
@@ -81,10 +79,8 @@ if "is_pro" not in st.session_state:
     st.session_state.is_pro = False
 if "last_messages" not in st.session_state:
     st.session_state.last_messages = []
-if "save_light_image" not in st.session_state:
-    st.session_state.save_light_image = False
-if "latest_light_image" not in st.session_state:
-    st.session_state.latest_light_image = None
+if "light_images" not in st.session_state:
+    st.session_state.light_images = []  # [{"filename": str, "bytes": bytes}]
 if "cached_excel" not in st.session_state:
     st.session_state.cached_excel = None
 
@@ -161,6 +157,13 @@ def build_excel_bytes(detail_df: pd.DataFrame, summary_df: pd.DataFrame) -> byte
         summary_df.to_excel(writer, index=False, sheet_name="勘定科目別集計")
     return output.getvalue()
 
+def build_images_zip(images: list[dict]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for item in images:
+            zf.writestr(item["filename"], item["bytes"])
+    return buf.getvalue()
+
 def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
     file_hash = hashlib.md5(raw_bytes).hexdigest()
     if file_hash in st.session_state.processed_hashes:
@@ -186,14 +189,18 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
             else:
                 send_bytes = optimize_image(raw_bytes)
                 mime_type = "image/jpeg"
-                if st.session_state.save_light_image:
-                    st.session_state.latest_light_image = {
-                        "bytes": send_bytes,
-                        "filename": f"receipt_light_{stamp}.jpg",
-                    }
 
             client = genai.Client(api_key=api_key)
             res = analyze_receipt(client, MODEL_NAME, send_bytes, mime_type)
+
+            date_part = (res.get("発生日") or stamp[:8]).replace("-", "")
+            shop_part = (res.get("取引先") or "receipt").replace("/", "_").replace(" ", "")[:12]
+
+            if not is_pdf:
+                st.session_state.light_images.append({
+                    "filename": f"{date_part}_{shop_part}_{len(st.session_state.light_images)+1:02d}.jpg",
+                    "bytes": send_bytes,
+                })
 
             new_row = {
                 "登録日時": now_str,
@@ -225,20 +232,6 @@ with tab1:
         for msg in st.session_state.last_messages:
             st.success(msg)
         st.session_state.last_messages = []
-
-    st.checkbox(
-        "軽量化したレシート画像（JPEG）を保存する",
-        key="save_light_image",
-        help="オンにすると、解析後に軽量化された画像をボタンから保存できます。",
-    )
-
-    if st.session_state.save_light_image and st.session_state.latest_light_image is not None:
-        st.download_button(
-            label=f"🖼️ 軽量化画像を保存（{st.session_state.latest_light_image['filename']}）",
-            data=st.session_state.latest_light_image["bytes"],
-            file_name=st.session_state.latest_light_image["filename"],
-            mime="image/jpeg",
-        )
 
     remaining = FREE_LIMIT - len(st.session_state.expenses_df)
     if not st.session_state.is_pro:
@@ -327,7 +320,6 @@ with tab2:
         excel_bytes = build_excel_bytes(edited_df, summary_df)
         excel_filename = f"kakutei_shinkoku_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
 
-        # ダウンロード後も明細は自動消去せず、一時保管データを更新
         st.session_state.cached_excel = {
             "bytes": excel_bytes,
             "filename": excel_filename,
@@ -344,11 +336,23 @@ with tab2:
             key="main_download_excel",
         )
 
+        # 軽量化画像を残したい人だけ「最後に1回だけ一括ZIP保存」できるボタン
+        if st.session_state.light_images:
+            zip_bytes = build_images_zip(st.session_state.light_images)
+            zip_filename = f"receipt_images_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
+            st.download_button(
+                label=f"🗂️ 軽量化レシート画像をまとめて保存（{len(st.session_state.light_images)}枚・ZIP）",
+                data=zip_bytes,
+                file_name=zip_filename,
+                mime="application/zip",
+                key="download_light_images_zip",
+            )
+
         st.markdown("---")
         if st.button("🗑️ 現在のデータをすべてクリア"):
             st.session_state.expenses_df = pd.DataFrame(columns=COLUMNS)
             st.session_state.processed_hashes = set()
-            st.session_state.latest_light_image = None
+            st.session_state.light_images = []
             st.rerun()
 
 st.markdown("---")
