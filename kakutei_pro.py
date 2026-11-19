@@ -93,49 +93,23 @@ st.markdown(
         letter-spacing: 0.08em;
     }
 
-    /* モバイル画面：縦長カメラディスプレイ＆案内文＋撮影ボタンの視認性重視 */
+    /* モバイル画面：カメラ映像を縦長にし、横幅の余白も比率に合わせて調整 */
     @media (max-width: 768px) {
         .block-container {
-            padding-top: 0.45rem !important;
-            padding-left: 0.55rem !important;
-            padding-right: 0.55rem !important;
-            padding-bottom: 1rem !important;
-        }
-        h1 {
-            font-size: 1.2rem !important;
-            margin-bottom: 0.1rem !important;
+            padding-left: 0.85rem !important;
+            padding-right: 0.85rem !important;
         }
         [data-testid="stCameraInput"] {
-            width: 100% !important;
-            margin-top: 0.15rem !important;
-            margin-bottom: 0.35rem !important;
-        }
-        [data-testid="stCameraInput"] > label {
-            margin-bottom: 0.3rem !important;
-            font-size: 0.85rem !important;
-            line-height: 1.25 !important;
-        }
-        [data-testid="stCameraInput"] > div,
-        [data-testid="stCameraInput"] > div > div {
             width: 100% !important;
         }
         [data-testid="stCameraInput"] video,
         [data-testid="stCameraInput"] canvas,
         [data-testid="stCameraInput"] img {
             width: 100% !important;
-            height: 62vh !important;
-            min-height: 420px !important;
-            max-height: 70vh !important;
-            margin-bottom: 0.55rem !important;
+            height: 58vh !important;
+            min-height: 380px !important;
             object-fit: cover !important;
             border-radius: 10px !important;
-        }
-        [data-testid="stCameraInput"] > div > div:last-child {
-            margin-top: 0.15rem !important;
-        }
-        [data-testid="stCameraInput"] button {
-            min-height: 3.8rem !important;
-            height: 3.8rem !important;
         }
     }
 </style>
