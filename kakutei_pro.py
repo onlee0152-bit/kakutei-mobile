@@ -21,7 +21,7 @@ FREE_LIMIT = 3
 
 st.set_page_config(page_title="撮るだけ確定申告 Pro", layout="centered")
 
-# シンプルで違和感のない微調整CSS（右上メニュー・フッター非表示＋ボタン角丸の自然な調整）
+# シンプルで違和感のないデザイン調整（タイトル縮小・右上メニュー非表示・表とボタンの視認性調整）
 st.markdown(
     """
     <style>
@@ -31,6 +31,23 @@ st.markdown(
     [data-testid="stToolbarActions"] {display: none;}
     [data-testid="manage-app-button"] {display: none;}
     [data-testid="stDecoration"] {display: none;}
+
+    /* メインタイトルが大きすぎないよう調整 */
+    h1 {
+        font-size: 1.55rem !important;
+        line-height: 1.3 !important;
+        margin-bottom: 0.25rem !important;
+    }
+    h2, h3 {
+        font-size: 1.15rem !important;
+        margin-top: 1rem !important;
+        margin-bottom: 0.4rem !important;
+    }
+
+    /* 集計テーブルの文字サイズを少し大きくして見やすく */
+    [data-testid="stDataFrame"] table {
+        font-size: 0.95rem !important;
+    }
 
     .stButton > button, .stDownloadButton > button, .stLinkButton > a {
         border-radius: 8px;
@@ -55,7 +72,7 @@ PRO_PASSCODE = get_secret("PRO_PASSCODE", "KAKUTEI2026")
 STRIPE_URL = get_secret("STRIPE_URL", "https://buy.stripe.com/test_your_link_here")
 MODEL_NAME = get_secret("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
-# セッション状態の初期化（ユーザーごとに完全分離・サーバー非保存）
+# セッション状態の初期化（ユーザーごとに完全分離・ダウンロード/クリアまで保持）
 if "expenses_df" not in st.session_state:
     st.session_state.expenses_df = pd.DataFrame(columns=COLUMNS)
 if "processed_hashes" not in st.session_state:
@@ -67,9 +84,9 @@ if "last_messages" not in st.session_state:
 if "save_light_image" not in st.session_state:
     st.session_state.save_light_image = False
 if "latest_light_image" not in st.session_state:
-    st.session_state.latest_light_image = None  # {"bytes": ..., "filename": ...}
+    st.session_state.latest_light_image = None
 if "cached_excel" not in st.session_state:
-    st.session_state.cached_excel = None  # {"bytes": ..., "filename": ..., "count": ..., "saved_at": ...}
+    st.session_state.cached_excel = None
 
 # 専用URL（?code=〇〇）による自動ロック解除
 try:
@@ -102,7 +119,7 @@ with st.sidebar:
                 st.error("パスコードが正しくありません。")
 
     st.markdown("---")
-    st.caption("🔒 プライバシー保護：画像と集計データはサーバーに永続保存されません。ダウンロード操作を行うまで画面上のデータは保持されます。")
+    st.caption("🔒 データは「すべてクリア」を押すまで保持されます。サーバーへの永続保存は行いません。")
 
 st.title("📸 撮るだけ確定申告 Pro")
 st.caption("レシートを撮るだけでAIが勘定科目・税率・インボイス番号を自動仕分けし、確定申告用Excelを作成します。")
@@ -149,7 +166,6 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
     if file_hash in st.session_state.processed_hashes:
         return False
 
-    # 無料枠チェック
     if not st.session_state.is_pro and len(st.session_state.expenses_df) >= FREE_LIMIT:
         st.warning(f"無料お試しの上限（{FREE_LIMIT}枚）に達しました。続けて利用するにはPro版のパスコードを入力してください。")
         st.link_button("💳 Pro版を購入して無制限にする", STRIPE_URL, type="primary")
@@ -205,17 +221,15 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
 tab1, tab2 = st.tabs(["📸 撮って即登録", "📊 集計・Excel出力"])
 
 with tab1:
-    # 直前の登録完了メッセージを表示してクリア
     if st.session_state.last_messages:
         for msg in st.session_state.last_messages:
             st.success(msg)
         st.session_state.last_messages = []
 
-    # 軽量化画像をiPhone等に保存するかどうかのチェックボックス
     st.checkbox(
         "軽量化したレシート画像（JPEG）を保存する",
         key="save_light_image",
-        help="オンにすると、解析後に軽量化された画像を保存ボタンからダウンロードできます。",
+        help="オンにすると、解析後に軽量化された画像をボタンから保存できます。",
     )
 
     if st.session_state.save_light_image and st.session_state.latest_light_image is not None:
@@ -298,13 +312,22 @@ with tab2:
         total_row = pd.DataFrame([{"勘定科目": "合計", "金額": int(summary_df["金額"].sum())}])
         summary_df = pd.concat([summary_df, total_row], ignore_index=True)
 
-        st.subheader("📊 勘定科目別 集計（確定申告・収支内訳書用）")
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        # 「勘定科目別 集計」タイトルの直下に集計表を配置
+        st.subheader("📊 勘定科目別 集計")
+        st.dataframe(
+            summary_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "勘定科目": st.column_config.TextColumn("勘定科目", width="medium"),
+                "金額": st.column_config.NumberColumn("合計金額（円）", format="¥%d", width="medium"),
+            },
+        )
 
         excel_bytes = build_excel_bytes(edited_df, summary_df)
         excel_filename = f"kakutei_shinkoku_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
 
-        # セッション内に一時保管（ダウンロード後も明細は自動消去しない）
+        # ダウンロード後も明細は自動消去せず、一時保管データを更新
         st.session_state.cached_excel = {
             "bytes": excel_bytes,
             "filename": excel_filename,
