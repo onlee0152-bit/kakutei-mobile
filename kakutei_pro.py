@@ -19,6 +19,8 @@ ACCOUNTS = [
     "新聞図書費", "荷造運賃", "外注工賃", "地代家賃", "水道光熱費", "雑費"
 ]
 FREE_LIMIT = 3
+WARN_LIMIT_TEXT_ONLY = 300
+WARN_LIMIT_WITH_IMAGES = 150
 
 st.set_page_config(page_title="撮るだけ確定申告 Pro", layout="centered")
 
@@ -79,6 +81,8 @@ if "is_pro" not in st.session_state:
     st.session_state.is_pro = False
 if "last_messages" not in st.session_state:
     st.session_state.last_messages = []
+if "keep_light_images" not in st.session_state:
+    st.session_state.keep_light_images = False
 if "light_images" not in st.session_state:
     st.session_state.light_images = []  # [{"filename": str, "bytes": bytes}]
 if "cached_excel" not in st.session_state:
@@ -164,6 +168,23 @@ def build_images_zip(images: list[dict]) -> bytes:
             zf.writestr(item["filename"], item["bytes"])
     return buf.getvalue()
 
+def render_capacity_notice(total_count: int, image_count: int, keep_images: bool):
+    has_images = keep_images or image_count > 0
+    limit = WARN_LIMIT_WITH_IMAGES if has_images else WARN_LIMIT_TEXT_ONLY
+    if total_count >= limit:
+        if has_images:
+            st.warning(
+                f"📦 登録データが **{total_count}件**（画像 **{image_count}枚**）になりました。"
+                "動作を軽く保つため、一度「📊 集計・Excel出力」タブでExcelと画像ZIPをダウンロードし、"
+                "「すべてクリア」で整理するのがおすすめです。"
+            )
+        else:
+            st.warning(
+                f"📦 登録データが **{total_count}件** になりました。"
+                "動作を軽く保つため、一度「📊 集計・Excel出力」タブでExcelをダウンロードし、"
+                "「すべてクリア」で整理するのがおすすめです。"
+            )
+
 def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
     file_hash = hashlib.md5(raw_bytes).hexdigest()
     if file_hash in st.session_state.processed_hashes:
@@ -196,7 +217,7 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
             date_part = (res.get("発生日") or stamp[:8]).replace("-", "")
             shop_part = (res.get("取引先") or "receipt").replace("/", "_").replace(" ", "")[:12]
 
-            if not is_pdf:
+            if not is_pdf and st.session_state.keep_light_images:
                 st.session_state.light_images.append({
                     "filename": f"{date_part}_{shop_part}_{len(st.session_state.light_images)+1:02d}.jpg",
                     "bytes": send_bytes,
@@ -233,6 +254,12 @@ with tab1:
             st.success(msg)
         st.session_state.last_messages = []
 
+    render_capacity_notice(
+        total_count=len(st.session_state.expenses_df),
+        image_count=len(st.session_state.light_images),
+        keep_images=st.session_state.keep_light_images,
+    )
+
     remaining = FREE_LIMIT - len(st.session_state.expenses_df)
     if not st.session_state.is_pro:
         if remaining > 0:
@@ -242,6 +269,16 @@ with tab1:
             st.link_button("💳 Pro版を購入して無制限にする", STRIPE_URL, type="primary")
     else:
         st.caption("📱 ブラウザの共有メニューから「ホーム画面に追加」しておくと、次回から1タップで開けます。")
+
+    keep_img_toggle = st.toggle(
+        "🗂️ 軽量化したレシート画像もZIP用に保管する（目安：150件まで / オフ時は300件まで）",
+        value=st.session_state.keep_light_images,
+    )
+    if keep_img_toggle != st.session_state.keep_light_images:
+        st.session_state.keep_light_images = keep_img_toggle
+        if not keep_img_toggle and st.session_state.light_images:
+            st.session_state.light_images = []
+        st.rerun()
 
     cam_img = st.camera_input("レシートを撮影")
     if cam_img is not None:
@@ -264,6 +301,12 @@ with tab1:
 
 with tab2:
     df = st.session_state.expenses_df
+
+    render_capacity_notice(
+        total_count=len(df),
+        image_count=len(st.session_state.light_images),
+        keep_images=st.session_state.keep_light_images,
+    )
 
     # ダウンロード失敗・やり直し用の「一時保管中Excel」リカバリ枠
     if st.session_state.cached_excel is not None:
@@ -336,7 +379,7 @@ with tab2:
             key="main_download_excel",
         )
 
-        # 軽量化画像を残したい人だけ「最後に1回だけ一括ZIP保存」できるボタン
+        # 画像保管がオンで画像が溜まっている場合のみ一括ZIPボタンを表示
         if st.session_state.light_images:
             zip_bytes = build_images_zip(st.session_state.light_images)
             zip_filename = f"receipt_images_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
