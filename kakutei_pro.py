@@ -93,43 +93,49 @@ st.markdown(
         letter-spacing: 0.08em;
     }
 
-    /* モバイル画面：カメラディスプレイを広げて案内文・映像・撮影ボタンを収まりやすく */
+    /* モバイル画面：縦長カメラディスプレイ＆案内文＋撮影ボタンの視認性重視 */
     @media (max-width: 768px) {
         .block-container {
-            padding-top: 0.6rem !important;
-            padding-left: 0.65rem !important;
-            padding-right: 0.65rem !important;
-            padding-bottom: 1.5rem !important;
+            padding-top: 0.45rem !important;
+            padding-left: 0.55rem !important;
+            padding-right: 0.55rem !important;
+            padding-bottom: 1rem !important;
         }
         h1 {
-            font-size: 1.25rem !important;
-            margin-bottom: 0.15rem !important;
+            font-size: 1.2rem !important;
+            margin-bottom: 0.1rem !important;
         }
         [data-testid="stCameraInput"] {
             width: 100% !important;
-            margin-top: 0.25rem !important;
-            margin-bottom: 0.5rem !important;
+            margin-top: 0.15rem !important;
+            margin-bottom: 0.35rem !important;
         }
         [data-testid="stCameraInput"] > label {
-            margin-bottom: 0.35rem !important;
-            font-size: 0.88rem !important;
-            line-height: 1.3 !important;
+            margin-bottom: 0.3rem !important;
+            font-size: 0.85rem !important;
+            line-height: 1.25 !important;
+        }
+        [data-testid="stCameraInput"] > div,
+        [data-testid="stCameraInput"] > div > div {
+            width: 100% !important;
         }
         [data-testid="stCameraInput"] video,
         [data-testid="stCameraInput"] canvas,
         [data-testid="stCameraInput"] img {
             width: 100% !important;
-            min-height: 46vh !important;
-            max-height: 56vh !important;
-            margin-bottom: 0.75rem !important;
+            height: 62vh !important;
+            min-height: 420px !important;
+            max-height: 70vh !important;
+            margin-bottom: 0.55rem !important;
             object-fit: cover !important;
+            border-radius: 10px !important;
         }
         [data-testid="stCameraInput"] > div > div:last-child {
-            margin-top: 0.25rem !important;
+            margin-top: 0.15rem !important;
         }
         [data-testid="stCameraInput"] button {
-            min-height: 4.2rem !important;
-            height: 4.2rem !important;
+            min-height: 3.8rem !important;
+            height: 3.8rem !important;
         }
     }
 </style>
