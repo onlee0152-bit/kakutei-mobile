@@ -114,8 +114,8 @@ MODEL_NAME = get_secret("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
 FALLBACK_MODELS = [
     MODEL_NAME,
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.8-flash",
 ]
 
 # セッション状態の初期化（クリアを押すまで保持）
@@ -216,8 +216,12 @@ def analyze_receipt(client: genai.Client, model: str, file_bytes: bytes, mime_ty
                 return json.loads(response.text)
             except APIError as e:
                 last_err = e
-                if getattr(e, "code", None) == 503 or "503" in str(e) or "UNAVAILABLE" in str(e):
-                    time.sleep(1.2 * (attempt + 1))
+                code = getattr(e, "code", None)
+                msg = str(e)
+                if code == 404 or "404" in msg or "NOT_FOUND" in msg:
+                    break
+                if code == 503 or "503" in msg or "UNAVAILABLE" in msg:
+                    time.sleep(1.0 * (attempt + 1))
                     continue
                 raise
             except Exception as e:
