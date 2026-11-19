@@ -2,8 +2,11 @@ import hashlib
 import io
 import json
 import os
+import tempfile
+import uuid
 import zipfile
 from datetime import datetime
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageEnhance, ImageOps
@@ -22,9 +25,12 @@ FREE_LIMIT = 3
 WARN_LIMIT_TEXT_ONLY = 300
 WARN_LIMIT_WITH_IMAGES = 150
 
+CACHE_DIR = Path(tempfile.gettempdir()) / "kakutei_pro_cache"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 st.set_page_config(page_title="撮るだけ確定申告 Pro", layout="centered")
 
-# デザイン調整（アイコンなし・上部余白短縮・撮影ボタン「撮影」化/太さ2倍/モニターと1行以上間隔）
+# デザイン調整（既存設定をそのまま維持）
 st.markdown(
     """
     <style>
@@ -92,10 +98,11 @@ st.markdown(
         line-height: 1.2 !important;
         letter-spacing: 0.08em;
     }
-</style>
+    </style>
     """,
     unsafe_allow_html=True,
 )
+
 
 def get_secret(key: str, default: str = "") -> str:
     try:
@@ -103,26 +110,180 @@ def get_secret(key: str, default: str = "") -> str:
     except Exception:
         return os.environ.get(key, default)
 
+
 api_key = get_secret("GEMINI_API_KEY", "")
 PRO_PASSCODE = get_secret("PRO_PASSCODE", "KAKUTEI2026")
 STRIPE_URL = get_secret("STRIPE_URL", "https://buy.stripe.com/test_your_link_here")
 MODEL_NAME = get_secret("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
-# セッション状態の初期化（クリアを押すまで保持）
-if "expenses_df" not in st.session_state:
+
+def get_or_create_sid() -> str:
+    """URLクエリ（?sid=）に端末識別IDを保持し、セッション再接続時も復元できるようにする"""
+    try:
+        sid = st.query_params.get("sid", "")
+        if isinstance(sid, list):
+            sid = sid[0] if sid else ""
+        sid = "".join(c for c in sid if c.isalnum())[:24]
+        if not sid:
+            sid = uuid.uuid4().hex[:16]
+            st.query_params["sid"] = sid
+        return sid
+    except Exception:
+        return "default"
+
+
+SID = get_or_create_sid()
+
+
+def get_state_paths(sid: str):
+    base = CACHE_DIR / f"session_{sid}"
+    return base.with_suffix(".json"), CACHE_DIR / f"imgs_{sid}"
+
+
+def build_excel_bytes(detail_df: pd.DataFrame, summary_df: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        detail_df.to_excel(writer, index=False, sheet_name="経費明細")
+        summary_df.to_excel(writer, index=False, sheet_name="勘定科目別集計")
+    return output.getvalue()
+
+
+def build_images_zip(images: list[dict]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for item in images:
+            zf.writestr(item["filename"], item["bytes"])
+    return buf.getvalue()
+
+
+def make_summary_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["勘定科目", "金額"])
+    summary_df = (
+        df.groupby("勘定科目", as_index=False)["金額"]
+        .sum()
+        .sort_values("金額", ascending=False)
+    )
+    total_row = pd.DataFrame([{"勘定科目": "合計", "金額": int(summary_df["金額"].sum())}])
+    return pd.concat([summary_df, total_row], ignore_index=True)
+
+
+def refresh_export_caches():
+    """登録・編集時にExcelとZIPのバイト列を事前生成してsession_stateに保持"""
+    df = st.session_state.expenses_df
+    if df.empty:
+        st.session_state.cached_excel = None
+    else:
+        summary_df = make_summary_df(df)
+        st.session_state.cached_excel = {
+            "bytes": build_excel_bytes(df, summary_df),
+            "filename": f"kakutei_shinkoku_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            "count": len(df),
+            "saved_at": datetime.now().strftime("%H:%M:%S"),
+        }
+
+    imgs = st.session_state.light_images
+    if not imgs:
+        st.session_state.cached_zip = None
+    else:
+        st.session_state.cached_zip = {
+            "bytes": build_images_zip(imgs),
+            "filename": f"receipt_images_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+            "count": len(imgs),
+        }
+
+
+def save_session_backup():
+    """登録・編集のたびに一時フォルダへ自動退避（セッション切れ対策）"""
+    try:
+        json_path, img_dir = get_state_paths(SID)
+        img_dir.mkdir(parents=True, exist_ok=True)
+
+        img_meta = []
+        valid_names = set()
+        for idx, item in enumerate(st.session_state.light_images):
+            safe_name = f"{idx:03d}_{os.path.basename(item['filename'])}"
+            valid_names.add(safe_name)
+            (img_dir / safe_name).write_bytes(item["bytes"])
+            img_meta.append({"filename": item["filename"], "stored": safe_name})
+
+        for old_file in img_dir.glob("*"):
+            if old_file.name not in valid_names:
+                old_file.unlink(missing_ok=True)
+
+        payload = {
+            "records": st.session_state.expenses_df.to_dict(orient="records"),
+            "hashes": list(st.session_state.processed_hashes),
+            "keep_light_images": st.session_state.keep_light_images,
+            "is_pro": st.session_state.is_pro,
+            "active_tab": st.session_state.active_tab,
+            "images": img_meta,
+        }
+        json_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def restore_session_backup() -> bool:
+    """セッションが切れて空になったとき、一時フォルダから自動復元"""
+    try:
+        json_path, img_dir = get_state_paths(SID)
+        if not json_path.exists():
+            return False
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        records = payload.get("records", [])
+        restored_imgs = []
+        for meta in payload.get("images", []):
+            p = img_dir / meta.get("stored", "")
+            if p.exists():
+                restored_imgs.append({"filename": meta["filename"], "bytes": p.read_bytes()})
+
+        if not records and not restored_imgs:
+            return False
+
+        st.session_state.expenses_df = pd.DataFrame(records, columns=COLUMNS) if records else pd.DataFrame(columns=COLUMNS)
+        st.session_state.processed_hashes = set(payload.get("hashes", []))
+        st.session_state.keep_light_images = bool(payload.get("keep_light_images", False))
+        if payload.get("is_pro"):
+            st.session_state.is_pro = True
+        if payload.get("active_tab") in ("撮って即登録", "集計・Excel出力"):
+            st.session_state.active_tab = payload["active_tab"]
+        st.session_state.light_images = restored_imgs
+        refresh_export_caches()
+        return True
+    except Exception:
+        return False
+
+
+def clear_session_backup():
+    """「すべてクリア」押下時のみ一時退避も完全削除"""
+    try:
+        json_path, img_dir = get_state_paths(SID)
+        json_path.unlink(missing_ok=True)
+        if img_dir.exists():
+            for f in img_dir.glob("*"):
+                f.unlink(missing_ok=True)
+            img_dir.rmdir()
+    except Exception:
+        pass
+
+
+# セッション状態の初期化
+first_boot = "initialized" not in st.session_state
+if first_boot:
+    st.session_state.initialized = True
     st.session_state.expenses_df = pd.DataFrame(columns=COLUMNS)
-if "processed_hashes" not in st.session_state:
     st.session_state.processed_hashes = set()
-if "is_pro" not in st.session_state:
     st.session_state.is_pro = False
-if "last_messages" not in st.session_state:
     st.session_state.last_messages = []
-if "keep_light_images" not in st.session_state:
     st.session_state.keep_light_images = False
-if "light_images" not in st.session_state:
-    st.session_state.light_images = []  # [{"filename": str, "bytes": bytes}]
-if "cached_excel" not in st.session_state:
+    st.session_state.light_images = []
     st.session_state.cached_excel = None
+    st.session_state.cached_zip = None
+    st.session_state.active_tab = "撮って即登録"
+    st.session_state.download_notice = ""
+    if restore_session_backup():
+        st.session_state.last_messages.append("前回の登録データを自動復元しました。")
 
 # 専用URL（?code=〇〇）による自動ロック解除
 try:
@@ -150,6 +311,7 @@ with st.sidebar:
             if input_code.strip() == PRO_PASSCODE:
                 st.session_state.is_pro = True
                 st.query_params["code"] = PRO_PASSCODE
+                save_session_backup()
                 st.rerun()
             else:
                 st.error("パスコードが正しくありません。")
@@ -159,6 +321,7 @@ with st.sidebar:
 
 st.title("撮るだけ確定申告 Pro")
 st.caption("レシートを撮るだけでAIが勘定科目・税率・インボイス番号を自動仕分けし、確定申告用Excelを作成します。")
+
 
 def optimize_image(file_bytes: bytes, max_size: int = 1280) -> bytes:
     img = Image.open(io.BytesIO(file_bytes))
@@ -170,6 +333,7 @@ def optimize_image(file_bytes: bytes, max_size: int = 1280) -> bytes:
     out = io.BytesIO()
     img.save(out, format="JPEG", quality=75, optimize=True)
     return out.getvalue()
+
 
 def analyze_receipt(client: genai.Client, model: str, file_bytes: bytes, mime_type: str) -> dict:
     prompt = f"""
@@ -190,19 +354,6 @@ def analyze_receipt(client: genai.Client, model: str, file_bytes: bytes, mime_ty
     )
     return json.loads(response.text)
 
-def build_excel_bytes(detail_df: pd.DataFrame, summary_df: pd.DataFrame) -> bytes:
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        detail_df.to_excel(writer, index=False, sheet_name="経費明細")
-        summary_df.to_excel(writer, index=False, sheet_name="勘定科目別集計")
-    return output.getvalue()
-
-def build_images_zip(images: list[dict]) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for item in images:
-            zf.writestr(item["filename"], item["bytes"])
-    return buf.getvalue()
 
 def render_capacity_notice(total_count: int, image_count: int, keep_images: bool):
     has_images = keep_images or image_count > 0
@@ -211,15 +362,16 @@ def render_capacity_notice(total_count: int, image_count: int, keep_images: bool
         if has_images:
             st.warning(
                 f"登録データが {total_count}件（画像 {image_count}枚）になりました。"
-                "動作を軽く保つため、一度「集計・Excel出力」タブでExcelと画像ZIPをダウンロードし、"
+                "動作を軽く保つため、一度「集計・Excel出力」でExcelと画像ZIPをダウンロードし、"
                 "「すべてクリア」で整理するのがおすすめです。"
             )
         else:
             st.warning(
                 f"登録データが {total_count}件 になりました。"
-                "動作を軽く保つため、一度「集計・Excel出力」タブでExcelをダウンロードし、"
+                "動作を軽く保つため、一度「集計・Excel出力」でExcelをダウンロードし、"
                 "「すべてクリア」で整理するのがおすすめです。"
             )
+
 
 def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
     file_hash = hashlib.md5(raw_bytes).hexdigest()
@@ -274,6 +426,9 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
                 ignore_index=True
             )
             st.session_state.processed_hashes.add(file_hash)
+            st.session_state.download_notice = ""
+            refresh_export_caches()
+            save_session_backup()
             st.session_state.last_messages.append(
                 f"登録完了：{new_row['取引先']} / ¥{new_row['金額']:,}（{new_row['勘定科目']}）"
             )
@@ -282,13 +437,49 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
             st.error(f"解析エラー: {e}")
             return False
 
-tab1, tab2 = st.tabs(["撮って即登録", "集計・Excel出力"])
 
-with tab1:
+def on_download_clicked(label_text: str):
+    """ダウンロード押下時にデータを消さず、画面状態と退避データを保持"""
+    st.session_state.active_tab = "集計・Excel出力"
+    st.session_state.download_notice = f"{label_text}をダウンロードしました（登録データ {len(st.session_state.expenses_df)}件は保持されています）。"
+    save_session_backup()
+
+
+def switch_tab(target_tab: str):
+    st.session_state.active_tab = target_tab
+    save_session_backup()
+
+
+# st.tabs ではなく session_state 連動の画面切り替え（再実行・戻り操作でも位置を維持）
+nav_options = ["撮って即登録", "集計・Excel出力"]
+selected_tab = st.radio(
+    "画面切り替え",
+    options=nav_options,
+    index=nav_options.index(st.session_state.active_tab),
+    horizontal=True,
+    label_visibility="collapsed",
+    key="nav_radio",
+)
+if selected_tab != st.session_state.active_tab:
+    st.session_state.active_tab = selected_tab
+    save_session_backup()
+
+st.markdown("---")
+
+if st.session_state.active_tab == "撮って即登録":
     if st.session_state.last_messages:
         for msg in st.session_state.last_messages:
             st.success(msg)
         st.session_state.last_messages = []
+
+    if len(st.session_state.expenses_df) > 0:
+        if st.button(
+            f"登録済み {len(st.session_state.expenses_df)}件 の集計・Excel出力へ →",
+            use_container_width=True,
+            key="go_to_export_btn",
+        ):
+            switch_tab("集計・Excel出力")
+            st.rerun()
 
     render_capacity_notice(
         total_count=len(st.session_state.expenses_df),
@@ -314,6 +505,8 @@ with tab1:
         st.session_state.keep_light_images = keep_img_toggle
         if not keep_img_toggle and st.session_state.light_images:
             st.session_state.light_images = []
+        refresh_export_caches()
+        save_session_backup()
         st.rerun()
 
     cam_img = st.camera_input("レシートを撮影")
@@ -335,7 +528,15 @@ with tab1:
         if added_any:
             st.rerun()
 
-with tab2:
+else:
+    if st.button("← 撮って即登録に戻る", use_container_width=True, key="back_to_capture_btn"):
+        st.session_state.download_notice = ""
+        switch_tab("撮って即登録")
+        st.rerun()
+
+    if st.session_state.download_notice:
+        st.success(st.session_state.download_notice)
+
     df = st.session_state.expenses_df
 
     render_capacity_notice(
@@ -344,47 +545,28 @@ with tab2:
         keep_images=st.session_state.keep_light_images,
     )
 
-    # ダウンロード失敗・やり直し用の「一時保管中Excel」リカバリ枠
-    if st.session_state.cached_excel is not None:
-        cached = st.session_state.cached_excel
-        with st.container(border=True):
-            st.caption(
-                f"一時保管中のExcelあり（作成：{cached['saved_at']} / {cached['count']}件）。"
-                "ダウンロードに失敗した場合や再取得したい場合はこちらからどうぞ。"
-            )
-            st.download_button(
-                label=f"一時保管中のExcelを再ダウンロード（{cached['filename']}）",
-                data=cached["bytes"],
-                file_name=cached["filename"],
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="redownload_cached_excel",
-            )
-
     if df.empty:
-        st.info("まだ登録されたレシートがありません。「撮って即登録」から撮影またはアップロードしてください。")
+        st.info("まだ登録されたレシートがありません。「← 撮って即登録に戻る」から撮影またはアップロードしてください。")
     else:
         st.subheader(f"経費明細の確認・修正（全 {len(df)} 件）")
         edited_df = st.data_editor(
             df,
             num_rows="dynamic",
             use_container_width=True,
+            key="expenses_editor",
             column_config={
                 "金額": st.column_config.NumberColumn("金額（円）", format="%d"),
                 "勘定科目": st.column_config.SelectboxColumn("勘定科目", options=ACCOUNTS),
                 "税率": st.column_config.SelectboxColumn("税率", options=["10%", "8%（軽減）", "対象外"]),
             },
         )
-        st.session_state.expenses_df = edited_df
+        if not edited_df.equals(df):
+            st.session_state.expenses_df = edited_df
+            refresh_export_caches()
+            save_session_backup()
 
-        summary_df = (
-            edited_df.groupby("勘定科目", as_index=False)["金額"]
-            .sum()
-            .sort_values("金額", ascending=False)
-        )
-        total_row = pd.DataFrame([{"勘定科目": "合計", "金額": int(summary_df["金額"].sum())}])
-        summary_df = pd.concat([summary_df, total_row], ignore_index=True)
+        summary_df = make_summary_df(st.session_state.expenses_df)
 
-        # 「勘定科目別 集計」タイトルの直下に集計表を配置
         st.subheader("勘定科目別 集計")
         st.dataframe(
             summary_df,
@@ -396,42 +578,45 @@ with tab2:
             },
         )
 
-        excel_bytes = build_excel_bytes(edited_df, summary_df)
-        excel_filename = f"kakutei_shinkoku_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        if st.session_state.cached_excel is None:
+            refresh_export_caches()
 
-        st.session_state.cached_excel = {
-            "bytes": excel_bytes,
-            "filename": excel_filename,
-            "count": len(edited_df),
-            "saved_at": datetime.now().strftime("%H:%M:%S"),
-        }
-
-        st.download_button(
-            label="確定申告用 Excel (.xlsx) をダウンロード",
-            data=excel_bytes,
-            file_name=excel_filename,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            key="main_download_excel",
-        )
-
-        # 画像保管がオンで画像が溜まっている場合のみ一括ZIPボタンを表示
-        if st.session_state.light_images:
-            zip_bytes = build_images_zip(st.session_state.light_images)
-            zip_filename = f"receipt_images_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
+        cached_excel = st.session_state.cached_excel
+        if cached_excel is not None:
             st.download_button(
-                label=f"軽量化レシート画像をまとめて保存（{len(st.session_state.light_images)}枚・ZIP）",
-                data=zip_bytes,
-                file_name=zip_filename,
+                label="確定申告用 Excel (.xlsx) をダウンロード",
+                data=cached_excel["bytes"],
+                file_name=cached_excel["filename"],
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True,
+                key="main_download_excel",
+                on_click=on_download_clicked,
+                args=("確定申告用 Excel (.xlsx)",),
+            )
+
+        cached_zip = st.session_state.cached_zip
+        if cached_zip is not None:
+            st.download_button(
+                label=f"軽量化レシート画像をまとめて保存（{cached_zip['count']}枚・ZIP）",
+                data=cached_zip["bytes"],
+                file_name=cached_zip["filename"],
                 mime="application/zip",
+                use_container_width=True,
                 key="download_light_images_zip",
+                on_click=on_download_clicked,
+                args=(f"レシート画像ZIP（{cached_zip['count']}枚）",),
             )
 
         st.markdown("---")
-        if st.button("現在のデータをすべてクリア"):
+        if st.button("現在のデータをすべてクリア", use_container_width=True, key="clear_all_btn"):
             st.session_state.expenses_df = pd.DataFrame(columns=COLUMNS)
             st.session_state.processed_hashes = set()
             st.session_state.light_images = []
+            st.session_state.cached_excel = None
+            st.session_state.cached_zip = None
+            st.session_state.download_notice = ""
+            clear_session_backup()
             st.rerun()
 
 st.markdown("---")
