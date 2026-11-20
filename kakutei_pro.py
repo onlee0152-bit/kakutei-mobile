@@ -27,7 +27,7 @@ WARN_LIMIT_WITH_IMAGES = 150
 
 st.set_page_config(page_title="撮るだけ確定申告 Pro", layout="centered")
 
-# デザイン調整（アイコンなし・上部余白短縮・撮影ボタンは四角非表示＆文字「◉」を赤色・約3倍サイズ・モニターと1行以上間隔）
+# デザイン調整（アイコンなし・上部余白短縮・撮影ボタンは四角非表示＆文字「◉」を赤色・今の約2倍サイズ・モニターと1行以上間隔）
 st.markdown(
     """
     <style>
@@ -77,7 +77,7 @@ st.markdown(
         margin-bottom: 1.35rem !important;
     }
 
-    /* 撮影ボタン（Take Photo）：四角枠非表示、文字「◉」を赤色・約3倍（3rem）で表示（右上切替ボタンは除外） */
+    /* 撮影ボタン：四角枠非表示、文字「◉」を赤色・今の約2倍（6rem）で表示（右上切替ボタンは除外） */
     [data-testid="stCameraInput"] button:not([title*="camera"]):not([aria-label*="camera"]):not([aria-label*="Camera"]),
     [data-testid="stCameraInput"] button:not([title*="camera"]):not([aria-label*="camera"]):not([aria-label*="Camera"]) * {
         font-size: 0 !important;
@@ -89,9 +89,9 @@ st.markdown(
         background-color: transparent !important;
         border: none !important;
         box-shadow: none !important;
-        min-height: 3.4rem !important;
+        min-height: 6.4rem !important;
         height: auto !important;
-        padding: 0.2rem 0.6rem !important;
+        padding: 0.2rem 0.8rem !important;
         margin-top: 0.6rem !important;
         display: inline-flex !important;
         align-items: center !important;
@@ -107,7 +107,7 @@ st.markdown(
     }
     [data-testid="stCameraInput"] button:not([title*="camera"]):not([aria-label*="camera"]):not([aria-label*="Camera"])::before {
         content: "◉";
-        font-size: 3rem !important;
+        font-size: 6rem !important;
         line-height: 1 !important;
         color: #e53935 !important;
         display: inline-block !important;
@@ -497,57 +497,4 @@ with tab2:
 
         summary_df = make_summary_df(st.session_state.expenses_df)
 
-        st.subheader("勘定科目別 集計")
-        st.dataframe(
-            summary_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "勘定科目": st.column_config.TextColumn("勘定科目", width="medium"),
-                "金額": st.column_config.NumberColumn("合計金額（円）", format="¥%d", width="medium"),
-            },
-        )
-
-        if st.session_state.cached_excel is None:
-            sync_export_cache()
-
-        cached_zip = st.session_state.cached_zip
-        cached_excel = st.session_state.cached_excel
-        if cached_zip is not None:
-            st.download_button(
-                label=f"確定申告用 Excel＋レシート画像をまとめて保存（{cached_zip['count']}枚・ZIP）",
-                data=cached_zip["bytes"],
-                file_name=cached_zip["filename"],
-                mime="application/zip",
-                type="primary",
-                key="download_bundle_zip",
-                on_click=mark_downloaded,
-                args=(f"Excel＋レシート画像ZIP（{cached_zip['count']}枚）をダウンロードしました",),
-            )
-        elif cached_excel is not None:
-            st.download_button(
-                label="確定申告用 Excel (.xlsx) をダウンロード",
-                data=cached_excel["bytes"],
-                file_name=cached_excel["filename"],
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                key="main_download_excel",
-                on_click=mark_downloaded,
-                args=("確定申告用 Excel (.xlsx) をダウンロードしました",),
-            )
-
-        st.markdown("---")
-        if st.button("現在のデータをすべてクリア"):
-            st.session_state.expenses_df = pd.DataFrame(columns=COLUMNS)
-            st.session_state.processed_hashes = set()
-            st.session_state.light_images = []
-            st.session_state.cached_excel = None
-            st.session_state.cached_zip = None
-            st.session_state.downloaded_info = ""
-            st.rerun()
-
-st.markdown("---")
-st.caption(
-    "※免責事項：本ツールはAIによる自動仕分け支援ツールです。最終的な税務申告の内容・勘定科目の妥当性については、必ずご自身または税理士にご確認ください。"
-    "アップロードされた画像およびデータは解析後に即時破棄され、サーバーには一切保存されません。"
-)
+        st
