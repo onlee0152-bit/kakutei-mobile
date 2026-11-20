@@ -3,7 +3,6 @@ import pandas as pd
 import io
 import zipfile
 import json
-import time
 import hashlib
 from datetime import datetime
 from PIL import Image, ImageOps
@@ -12,20 +11,38 @@ from google.genai import types
 
 st.set_page_config(
     page_title="撮るだけ確定申告 Pro",
-    page_icon="🧾",
     layout="centered",
     initial_sidebar_state="collapsed",
 )
 
-# st.secrets に GEMINI_MODEL があればそれを優先し、なければエラー案内順で試行
-DEFAULT_MODELS = [
-    st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash"),
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-]
-# 重複を除去しつつ順序維持
-CANDIDATE_MODELS = list(dict.fromkeys([m for m in DEFAULT_MODELS if m]))
+# タイトルサイズ調整＋「Take Photo」ボタンを「撮影」表示にするCSS
+st.markdown(
+    """
+    <style>
+    .app-main-title {
+        font-size: 1.45rem;
+        font-weight: 700;
+        line-height: 1.3;
+        margin: 0.2rem 0 0.4rem 0;
+        color: inherit;
+    }
+    button[kind="secondary"][data-testid="stBaseButton-secondary"] {
+        position: relative;
+    }
+    div[data-testid="stCameraInput"] button {
+        font-size: 0 !important;
+    }
+    div[data-testid="stCameraInput"] button::after {
+        content: "撮影";
+        font-size: 0.95rem !important;
+        font-weight: 600;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
+MODEL_NAME = st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")
 WARN_LIMIT_TEXT_ONLY = 300
 WARN_LIMIT_WITH_IMAGES = 150
 
@@ -69,7 +86,7 @@ def check_access():
     if st.session_state.get("authenticated"):
         return True
 
-    st.title("🧾 撮るだけ確定申告 Pro")
+    st.markdown('<div class="app-main-title">撮るだけ確定申告 Pro</div>', unsafe_allow_html=True)
     st.info("ご利用には専用パスコードが必要です。決済完了メールのリンクまたはパスコードを入力してください。")
     input_code = st.text_input("パスコード", type="password")
     if st.button("ロック解除", use_container_width=True, type="primary"):
@@ -85,7 +102,7 @@ if not check_access():
     st.stop()
 
 
-def optimize_image(file_bytes: bytes, max_px: int = 1280, quality: int = 75) -> bytes:
+def optimize_image(file_bytes: bytes, max_px: int = 1024, quality: int = 72) -> bytes:
     img = Image.open(io.BytesIO(file_bytes))
     img = ImageOps.exif_transpose(img)
     if img.mode in ("RGBA", "P"):
@@ -152,7 +169,6 @@ def analyze_receipt(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
 
     client = genai.Client(api_key=api_key)
     prompt = f"""
-あなたは日本の確定申告・経理実務に精通したAIアシスタントです。
 画像（レシート・領収書・請求書）から以下の項目を抽出し、JSONのみで返してください。
 
 - date: 日付（YYYY-MM-DD形式。不明時は今日の日付）
@@ -185,32 +201,19 @@ def analyze_receipt(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
         ],
     }
 
-    last_err = None
-    for model_name in CANDIDATE_MODELS:
-        for attempt in range(2):
-            try:
-                res = client.models.generate_content(
-                    model=model_name,
-                    contents=[
-                        types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                        prompt,
-                    ],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=response_schema,
-                        temperature=0.1,
-                    ),
-                )
-                return json.loads(res.text)
-            except Exception as e:
-                last_err = e
-                msg = str(e)
-                # 404 の場合はこのモデル名が使えないため次の候補モデルへ即移る
-                if "404" in msg or "NOT_FOUND" in msg:
-                    break
-                if attempt == 0:
-                    time.sleep(1.2)
-    raise last_err
+    res = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=[
+            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            prompt,
+        ],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=response_schema,
+            temperature=0.1,
+        ),
+    )
+    return json.loads(res.text)
 
 
 def process_uploaded_file(uploaded_file):
@@ -262,8 +265,8 @@ def process_uploaded_file(uploaded_file):
     )
 
 
-st.title("🧾 撮るだけ確定申告 Pro")
-st.caption("⚠️ 現在のデータはブラウザの一時メモリに保持されます。ページ再読み込み・再起動でリセットされるため、作業の区切りで必ず「一括ダウンロード」を実行してください。")
+st.markdown('<div class="app-main-title">撮るだけ確定申告 Pro</div>', unsafe_allow_html=True)
+st.caption("現在のデータはブラウザの一時メモリに保持されます。ページ再読み込み・再起動でリセットされるため、作業の区切りで必ず「一括ダウンロード」を実行してください。")
 
 keep_toggle = st.toggle(
     "レシート画像もZIPに同梱して保管する（オフ時はExcelのみ・高速軽量）",
@@ -281,11 +284,11 @@ limit = WARN_LIMIT_WITH_IMAGES if st.session_state["keep_images"] else WARN_LIMI
 if count >= limit:
     st.warning(f"現在 {count} 件登録されています。動作の安定性を保つため、一度「集計・一括ダウンロード」から保存し、データクリアで区切ることをおすすめします。")
 
-tab1, tab2 = st.tabs([f"📸 撮って即登録 ({count}件)", "📊 集計・一括ダウンロード"])
+tab1, tab2 = st.tabs([f"撮って即登録 ({count}件)", "集計・一括ダウンロード"])
 
 with tab1:
     cam_file = st.camera_input(
-        "📷 レシート撮影",
+        "レシート撮影",
         key=f"camera_input_{st.session_state['camera_reset_key']}",
     )
     if cam_file is not None:
@@ -298,7 +301,7 @@ with tab1:
                 st.session_state["last_status"] = ("error", f"読み取りエラーが発生しました（入力済みデータは保護されています）: {e}")
 
     up_files = st.file_uploader(
-        "📁 または画像・PDFを選択（複数可）",
+        "または画像・PDFを選択（複数可）",
         type=["jpg", "jpeg", "png", "webp", "heic", "pdf"],
         accept_multiple_files=True,
     )
@@ -349,7 +352,7 @@ with tab2:
             st.caption("Excel（.xlsx）と軽量化レシート画像（receiptsフォルダ）を1つのZIPにまとめて保存します。iPhoneでは「その他...」→「“ファイル”に保存」を選んでください。")
             if st.session_state["cached_zip_bytes"]:
                 st.download_button(
-                    label="📦 Excel＋画像を1つのZIPで一括ダウンロード",
+                    label="Excel＋画像を1つのZIPで一括ダウンロード",
                     data=st.session_state["cached_zip_bytes"],
                     file_name=st.session_state["cached_zip_name"],
                     mime="application/zip",
@@ -360,7 +363,7 @@ with tab2:
             st.caption("画像保管がオフのため、Excel（.xlsx）のみをダウンロードします。")
             if st.session_state["cached_excel_bytes"]:
                 st.download_button(
-                    label="📥 確定申告用Excelをダウンロード (.xlsx)",
+                    label="確定申告用Excelをダウンロード (.xlsx)",
                     data=st.session_state["cached_excel_bytes"],
                     file_name=st.session_state["cached_excel_name"],
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -369,7 +372,7 @@ with tab2:
                 )
 
         st.divider()
-        if st.button("🗑️ 保存完了後にデータをすべてクリア", use_container_width=True):
+        if st.button("保存完了後にデータをすべてクリア", use_container_width=True):
             st.session_state["records"] = []
             st.session_state["saved_images"] = {}
             st.session_state["processed_hashes"] = set()
