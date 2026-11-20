@@ -15,18 +15,10 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# タイトルサイズ調整・右上ツールバー非表示・撮影ボタンを今の2倍サイズ＆「撮影」表示にするCSS
+# タイトルサイズ調整・撮影ボタンを約2倍サイズ＆「撮影」表示にするCSS（×ボタンと重ならないよう分離）
 st.markdown(
     """
     <style>
-    [data-testid="stToolbar"],
-    [data-testid="stDecoration"],
-    [data-testid="stStatusWidget"],
-    .stDeployButton,
-    #MainMenu {
-        display: none !important;
-        visibility: hidden !important;
-    }
     .app-main-title {
         font-size: 1.45rem;
         font-weight: 700;
@@ -34,18 +26,18 @@ st.markdown(
         margin: 0.2rem 0 0.4rem 0;
         color: inherit;
     }
-    div[data-testid="stCameraInput"] button {
+    div[data-testid="stCameraInput"] button:not([aria-label="Clear photo"]) {
         font-size: 0 !important;
-        padding: 1.2rem 2.4rem !important;
-        min-height: 5.5rem !important;
-        min-width: 12rem !important;
-        border-radius: 12px !important;
+        padding: 0.85rem 1.8rem !important;
+        min-height: 3.6rem !important;
+        min-width: 8rem !important;
+        border-radius: 10px !important;
         cursor: pointer !important;
         touch-action: manipulation !important;
     }
-    div[data-testid="stCameraInput"] button::after {
+    div[data-testid="stCameraInput"] button:not([aria-label="Clear photo"])::after {
         content: "撮影";
-        font-size: 1.9rem !important;
+        font-size: 1.35rem !important;
         font-weight: 700 !important;
         line-height: 1.2 !important;
         display: inline-block !important;
