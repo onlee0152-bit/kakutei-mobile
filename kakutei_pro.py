@@ -76,14 +76,15 @@ st.markdown(
     [data-testid="stCameraInput"] img {
         margin-bottom: 1.35rem !important;
     }
-    [data-testid="stCameraInput"] > div > div:last-child {
-        margin-top: 0.6rem !important;
-        display: flex !important;
-        justify-content: center !important;
-    }
 
-    /* 撮影ボタン：四角枠非表示、文字「◉」を赤色・約3倍（3rem）で表示（カメラ切替ボタンはそのまま残す） */
-    [data-testid="stCameraInput"] > div > div:last-child button {
+    /* 撮影ボタン（Take Photo）：四角枠非表示、文字「◉」を赤色・約3倍（3rem）で表示（右上切替ボタンは除外） */
+    [data-testid="stCameraInput"] button:not([title*="camera"]):not([aria-label*="camera"]):not([aria-label*="Camera"]),
+    [data-testid="stCameraInput"] button:not([title*="camera"]):not([aria-label*="camera"]):not([aria-label*="Camera"]) * {
+        font-size: 0 !important;
+        line-height: 0 !important;
+        color: transparent !important;
+    }
+    [data-testid="stCameraInput"] button:not([title*="camera"]):not([aria-label*="camera"]):not([aria-label*="Camera"]) {
         background: transparent !important;
         background-color: transparent !important;
         border: none !important;
@@ -91,22 +92,20 @@ st.markdown(
         min-height: 3.4rem !important;
         height: auto !important;
         padding: 0.2rem 0.6rem !important;
-        font-size: 0 !important;
-        line-height: 0 !important;
-        color: transparent !important;
+        margin-top: 0.6rem !important;
         display: inline-flex !important;
         align-items: center !important;
         justify-content: center !important;
     }
-    [data-testid="stCameraInput"] > div > div:last-child button:hover,
-    [data-testid="stCameraInput"] > div > div:last-child button:focus,
-    [data-testid="stCameraInput"] > div > div:last-child button:active {
+    [data-testid="stCameraInput"] button:not([title*="camera"]):not([aria-label*="camera"]):not([aria-label*="Camera"]):hover,
+    [data-testid="stCameraInput"] button:not([title*="camera"]):not([aria-label*="camera"]):not([aria-label*="Camera"]):focus,
+    [data-testid="stCameraInput"] button:not([title*="camera"]):not([aria-label*="camera"]):not([aria-label*="Camera"]):active {
         background: transparent !important;
         background-color: transparent !important;
         border: none !important;
         box-shadow: none !important;
     }
-    [data-testid="stCameraInput"] > div > div:last-child button::before {
+    [data-testid="stCameraInput"] button:not([title*="camera"]):not([aria-label*="camera"]):not([aria-label*="Camera"])::before {
         content: "◉";
         font-size: 3rem !important;
         line-height: 1 !important;
