@@ -15,7 +15,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# タイトルサイズ調整・撮影ボタンを約2倍サイズ＆「撮影」表示にするCSS（×ボタンと重ならないよう分離）
+# タイトルサイズ調整のみ（カメラボタンは重なり・崩れを防ぐため無理な擬似要素や過剰なサイズ変更をしない）
 st.markdown(
     """
     <style>
@@ -25,22 +25,6 @@ st.markdown(
         line-height: 1.3;
         margin: 0.2rem 0 0.4rem 0;
         color: inherit;
-    }
-    div[data-testid="stCameraInput"] button:not([aria-label="Clear photo"]) {
-        font-size: 0 !important;
-        padding: 0.85rem 1.8rem !important;
-        min-height: 3.6rem !important;
-        min-width: 8rem !important;
-        border-radius: 10px !important;
-        cursor: pointer !important;
-        touch-action: manipulation !important;
-    }
-    div[data-testid="stCameraInput"] button:not([aria-label="Clear photo"])::after {
-        content: "撮影";
-        font-size: 1.35rem !important;
-        font-weight: 700 !important;
-        line-height: 1.2 !important;
-        display: inline-block !important;
     }
     </style>
     """,
@@ -69,7 +53,6 @@ def init_session():
         "cached_zip_name": "",
         "cached_excel_bytes": None,
         "cached_excel_name": "",
-        "last_processed_cam_digest": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -292,16 +275,13 @@ if count >= limit:
 tab1, tab2 = st.tabs([f"撮って即登録 ({count}件)", "集計・一括ダウンロード"])
 
 with tab1:
-    cam_file = st.camera_input("レシート撮影", key="main_camera_input")
+    cam_file = st.camera_input("レシート撮影")
     if cam_file is not None:
-        cam_bytes = cam_file.getvalue()
-        cam_digest = hashlib.sha256(cam_bytes).hexdigest()
-        if cam_digest != st.session_state["last_processed_cam_digest"]:
+        cam_hash = hashlib.sha256(cam_file.getvalue()).hexdigest()
+        if cam_hash not in st.session_state["processed_hashes"]:
             with st.spinner("AIがレシートを解析中..."):
                 try:
                     process_uploaded_file(cam_file)
-                    st.session_state["last_processed_cam_digest"] = cam_digest
-                    st.rerun()
                 except Exception as e:
                     st.session_state["last_status"] = ("error", f"読み取りエラーが発生しました（入力済みデータは保護されています）: {e}")
 
@@ -383,6 +363,5 @@ with tab2:
             st.session_state["processed_hashes"] = set()
             st.session_state["cached_excel_bytes"] = None
             st.session_state["cached_zip_bytes"] = None
-            st.session_state["last_processed_cam_digest"] = ""
             st.session_state["last_status"] = ("warning", "すべてのデータをクリアしました。")
             st.rerun()
