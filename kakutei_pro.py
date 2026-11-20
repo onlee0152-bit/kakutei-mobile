@@ -27,7 +27,7 @@ WARN_LIMIT_WITH_IMAGES = 150
 
 st.set_page_config(page_title="撮るだけ確定申告 Pro", layout="centered")
 
-# デザイン調整（アイコンなし・上部余白短縮・撮影ボタン「撮影」化/太さ2倍/モニターと1行以上間隔・カメラ切替ボタン保護）
+# デザイン調整（アイコンなし・上部余白短縮・撮影ボタンは四角のまま真ん中に赤い丸・モニターと1行以上間隔）
 st.markdown(
     """
     <style>
@@ -80,20 +80,25 @@ st.markdown(
         margin-top: 0.6rem !important;
     }
 
-    /* 下部の撮影ボタンのみ太さ（高さ）を約2倍にし、「Take Photo」を「撮影」に置換（カメラ切替ボタンはそのまま残す） */
+    /* 撮影ボタン：四角のまま高さ約2倍・文字を消して中央に赤い丸を表示（カメラ切替ボタンはそのまま残す） */
     [data-testid="stCameraInput"] > div > div:last-child button {
         min-height: 4.8rem !important;
         height: 4.8rem !important;
         font-size: 0 !important;
         line-height: 0 !important;
+        color: transparent !important;
         border-radius: 10px !important;
-        font-weight: 600 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
     }
     [data-testid="stCameraInput"] > div > div:last-child button::after {
-        content: "撮影";
-        font-size: 1.05rem !important;
-        line-height: 1.2 !important;
-        letter-spacing: 0.08em;
+        content: "" !important;
+        width: 1.8rem !important;
+        height: 1.8rem !important;
+        background-color: #e53935 !important;
+        border-radius: 50% !important;
+        display: inline-block !important;
     }
     </style>
     """,
