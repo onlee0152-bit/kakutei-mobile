@@ -15,10 +15,18 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# タイトルサイズ調整＋「Take Photo」ボタンを「撮影」表示にするCSS
+# タイトルサイズ調整・右上ツールバー非表示・撮影ボタンを今の2倍サイズ＆「撮影」表示にするCSS
 st.markdown(
     """
     <style>
+    [data-testid="stToolbar"],
+    [data-testid="stDecoration"],
+    [data-testid="stStatusWidget"],
+    .stDeployButton,
+    #MainMenu {
+        display: none !important;
+        visibility: hidden !important;
+    }
     .app-main-title {
         font-size: 1.45rem;
         font-weight: 700;
@@ -26,16 +34,21 @@ st.markdown(
         margin: 0.2rem 0 0.4rem 0;
         color: inherit;
     }
-    button[kind="secondary"][data-testid="stBaseButton-secondary"] {
-        position: relative;
-    }
     div[data-testid="stCameraInput"] button {
         font-size: 0 !important;
+        padding: 1.2rem 2.4rem !important;
+        min-height: 5.5rem !important;
+        min-width: 12rem !important;
+        border-radius: 12px !important;
+        cursor: pointer !important;
+        touch-action: manipulation !important;
     }
     div[data-testid="stCameraInput"] button::after {
         content: "撮影";
-        font-size: 0.95rem !important;
-        font-weight: 600;
+        font-size: 1.9rem !important;
+        font-weight: 700 !important;
+        line-height: 1.2 !important;
+        display: inline-block !important;
     }
     </style>
     """,
@@ -64,7 +77,7 @@ def init_session():
         "cached_zip_name": "",
         "cached_excel_bytes": None,
         "cached_excel_name": "",
-        "camera_reset_key": 0,
+        "last_processed_cam_digest": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -287,18 +300,18 @@ if count >= limit:
 tab1, tab2 = st.tabs([f"撮って即登録 ({count}件)", "集計・一括ダウンロード"])
 
 with tab1:
-    cam_file = st.camera_input(
-        "レシート撮影",
-        key=f"camera_input_{st.session_state['camera_reset_key']}",
-    )
+    cam_file = st.camera_input("レシート撮影", key="main_camera_input")
     if cam_file is not None:
-        with st.spinner("AIがレシートを解析中..."):
-            try:
-                process_uploaded_file(cam_file)
-                st.session_state["camera_reset_key"] += 1
-                st.rerun()
-            except Exception as e:
-                st.session_state["last_status"] = ("error", f"読み取りエラーが発生しました（入力済みデータは保護されています）: {e}")
+        cam_bytes = cam_file.getvalue()
+        cam_digest = hashlib.sha256(cam_bytes).hexdigest()
+        if cam_digest != st.session_state["last_processed_cam_digest"]:
+            with st.spinner("AIがレシートを解析中..."):
+                try:
+                    process_uploaded_file(cam_file)
+                    st.session_state["last_processed_cam_digest"] = cam_digest
+                    st.rerun()
+                except Exception as e:
+                    st.session_state["last_status"] = ("error", f"読み取りエラーが発生しました（入力済みデータは保護されています）: {e}")
 
     up_files = st.file_uploader(
         "または画像・PDFを選択（複数可）",
@@ -378,5 +391,6 @@ with tab2:
             st.session_state["processed_hashes"] = set()
             st.session_state["cached_excel_bytes"] = None
             st.session_state["cached_zip_bytes"] = None
+            st.session_state["last_processed_cam_digest"] = ""
             st.session_state["last_status"] = ("warning", "すべてのデータをクリアしました。")
             st.rerun()
