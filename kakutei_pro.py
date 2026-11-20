@@ -161,8 +161,8 @@ if "cached_excel" not in st.session_state:
     st.session_state.cached_excel = None
 if "cached_zip" not in st.session_state:
     st.session_state.cached_zip = None
-if "downloaded_info" not in st.session_state:
-    st.session_state.downloaded_info = ""
+if "camera_session_id" not in st.session_state:
+    st.session_state.camera_session_id = 0
 
 # 専用URL（?code=〇〇）による自動ロック解除
 try:
@@ -266,13 +266,13 @@ def make_summary_df(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["勘定科目", "金額"])
     work_df = df.copy()
     work_df["金額"] = work_df["金額"].apply(clean_amount)
-    summary_df = (
+    grouped = (
         work_df.groupby("勘定科目", as_index=False)["金額"]
         .sum()
         .sort_values("金額", ascending=False)
     )
-    total_row = pd.DataFrame([{"勘定科目": "合計", "金額": int(summary_df["金額"].sum())}])
-    return pd.concat([summary_df, total_row], ignore_index=True)
+    total_row = pd.DataFrame([{"勘定科目": "合計", "金額": int(grouped["金額"].sum())}])
+    return pd.concat([grouped, total_row], ignore_index=True)
 
 
 def sync_export_cache():
@@ -376,7 +376,6 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
                 ignore_index=True
             )
             st.session_state.processed_hashes.add(file_hash)
-            st.session_state.downloaded_info = ""
             sync_export_cache()
             st.session_state.last_messages.append(
                 f"登録完了：{new_row['取引先']} / ¥{new_row['金額']:,}（{new_row['勘定科目']}）"
@@ -386,10 +385,6 @@ def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
         except Exception as e:
             st.error(f"解析エラー: {e}")
             return False
-
-
-def mark_downloaded(msg: str):
-    st.session_state.downloaded_info = msg
 
 
 tab1, tab2 = st.tabs(["撮って即登録", "集計・Excel出力"])
@@ -422,7 +417,10 @@ with tab1:
         sync_export_cache()
         st.rerun()
 
-    cam_img = st.camera_input("レシートを撮影")
+    cam_img = st.camera_input(
+        "レシートを撮影",
+        key=f"camera_input_{st.session_state.camera_session_id}",
+    )
     if cam_img is not None:
         if process_and_append(cam_img.getvalue(), is_pdf=False):
             st.rerun()
@@ -451,10 +449,6 @@ with tab1:
 with tab2:
     df = st.session_state.expenses_df
 
-    if st.session_state.downloaded_info:
-        st.success(f"{st.session_state.downloaded_info}（現在の登録件数：{len(df)}件）")
-        st.caption("続けて撮影・登録したい場合は、上の「撮って即登録」タブをタップしてください。")
-
     render_capacity_notice(
         total_count=len(df),
         image_count=len(st.session_state.light_images),
@@ -474,8 +468,6 @@ with tab2:
                 file_name=cached["filename"],
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="redownload_cached_excel",
-                on_click=mark_downloaded,
-                args=("一時保管中のExcelをダウンロードしました",),
             )
 
     if df.empty:
@@ -497,9 +489,8 @@ with tab2:
             st.session_state.expenses_df = edited_df
             sync_export_cache()
 
-        summary_df = make_summary_df(st.session_state.expenses_df)
-        if not isinstance(summary_df, pd.DataFrame):
-            summary_df = make_summary_df(pd.DataFrame(columns=COLUMNS))
+        raw_summary = make_summary_df(st.session_state.expenses_df)
+        summary_df = raw_summary if isinstance(raw_summary, pd.DataFrame) else pd.DataFrame(columns=["勘定科目", "金額"])
 
         st.subheader("勘定科目別 集計")
         st.dataframe(
@@ -525,8 +516,6 @@ with tab2:
                 mime="application/zip",
                 type="primary",
                 key="download_bundle_zip",
-                on_click=mark_downloaded,
-                args=(f"Excel＋レシート画像ZIP（{cached_zip['count']}枚）をダウンロードしました",),
             )
         elif cached_excel is not None:
             st.download_button(
@@ -536,8 +525,6 @@ with tab2:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
                 key="main_download_excel",
-                on_click=mark_downloaded,
-                args=("確定申告用 Excel (.xlsx) をダウンロードしました",),
             )
 
         st.markdown("---")
@@ -547,7 +534,7 @@ with tab2:
             st.session_state.light_images = []
             st.session_state.cached_excel = None
             st.session_state.cached_zip = None
-            st.session_state.downloaded_info = ""
+            st.session_state.camera_session_id += 1
             st.rerun()
 
 st.markdown("---")
