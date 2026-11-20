@@ -27,7 +27,7 @@ WARN_LIMIT_WITH_IMAGES = 150
 
 st.set_page_config(page_title="撮るだけ確定申告 Pro", layout="centered")
 
-# デザイン調整（アイコンなし・上部余白短縮・撮影ボタンは四角非表示＆文字サイズ3倍の赤い丸・モニターと1行以上間隔）
+# デザイン調整（アイコンなし・上部余白短縮・撮影ボタンは四角のまま真ん中に赤い⭕️・モニターと1行以上間隔）
 st.markdown(
     """
     <style>
@@ -78,41 +78,24 @@ st.markdown(
     }
     [data-testid="stCameraInput"] > div > div:last-child {
         margin-top: 0.6rem !important;
-        display: flex !important;
-        justify-content: center !important;
     }
 
-    /* 撮影ボタン：四角枠を非表示・文字を消して、今の文字サイズの約3倍（3.15rem）の赤い丸を表示 */
-    [data-testid="stCameraInput"] > div > div:last-child button,
-    [data-testid="stCameraInput"] > div > div:last-child button * {
+    /* 撮影ボタン：四角のまま高さ約2倍・文字を消して中央に赤い丸を表示（カメラ切替ボタンはそのまま残す） */
+    [data-testid="stCameraInput"] > div > div:last-child button {
+        min-height: 4.8rem !important;
+        height: 4.8rem !important;
         font-size: 0 !important;
         line-height: 0 !important;
         color: transparent !important;
-    }
-    [data-testid="stCameraInput"] > div > div:last-child button {
-        background: transparent !important;
-        background-color: transparent !important;
-        border: none !important;
-        box-shadow: none !important;
-        min-height: 3.6rem !important;
-        height: auto !important;
-        padding: 0.25rem !important;
-        display: inline-flex !important;
+        border-radius: 10px !important;
+        display: flex !important;
         align-items: center !important;
         justify-content: center !important;
     }
-    [data-testid="stCameraInput"] > div > div:last-child button:hover,
-    [data-testid="stCameraInput"] > div > div:last-child button:focus,
-    [data-testid="stCameraInput"] > div > div:last-child button:active {
-        background: transparent !important;
-        background-color: transparent !important;
-        border: none !important;
-        box-shadow: none !important;
-    }
     [data-testid="stCameraInput"] > div > div:last-child button::after {
         content: "" !important;
-        width: 3.15rem !important;
-        height: 3.15rem !important;
+        width: 1.8rem !important;
+        height: 1.8rem !important;
         background-color: #e53935 !important;
         border-radius: 50% !important;
         display: inline-block !important;
