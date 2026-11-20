@@ -1,514 +1,370 @@
-import hashlib
-import io
-import json
-import os
-import time
-import zipfile
-from datetime import datetime
-import pandas as pd
 import streamlit as st
-from PIL import Image, ImageEnhance, ImageOps
-import pillow_heif
+import pandas as pd
+import io
+import zipfile
+import json
+import time
+import hashlib
+from datetime import datetime
+from PIL import Image, ImageOps
 from google import genai
 from google.genai import types
-from google.genai.errors import APIError
 
-pillow_heif.register_heif_opener()
+# ==========================================
+# 1. ページ設定・基本定数
+# ==========================================
+st.set_page_config(
+    page_title="撮るだけ確定申告 Pro",
+    page_icon="🧾",
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
 
-COLUMNS = ["登録日時", "発生日", "取引先", "勘定科目", "金額", "税率", "インボイス番号", "備考"]
-ACCOUNTS = [
-    "消耗品費", "旅費交通費", "通信費", "会議費", "接待交際費",
-    "新聞図書費", "荷造運賃", "外注工賃", "地代家賃", "水道光熱費", "雑費"
-]
-FREE_LIMIT = 3
+PRIMARY_MODEL = "gemini-2.5-flash"
 WARN_LIMIT_TEXT_ONLY = 300
 WARN_LIMIT_WITH_IMAGES = 150
 
-st.set_page_config(page_title="撮るだけ確定申告 Pro", layout="centered")
+ACCOUNT_CATEGORIES = [
+    "消耗品費", "旅費交通費", "接待交際費", "会議費", "通信費",
+    "水道光熱費", "地代家賃", "新聞図書費", "広告宣伝費", "車両費",
+    "支払手数料", "外注工賃", "修繕費", "租税公課", "雑費"
+]
 
-# デザイン調整（アイコンなし・上部余白短縮・撮影ボタン「撮影」化/太さ2倍/モニターと1行以上間隔）
-st.markdown(
-    """
-    <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    .stAppDeployButton {display: none;}
-    [data-testid="stToolbarActions"] {display: none;}
-    [data-testid="manage-app-button"] {display: none;}
-    [data-testid="stDecoration"] {display: none;}
-    header[data-testid="stHeader"] {
-        height: 1.5rem;
-        min-height: 1.5rem;
+# ==========================================
+# 2. セッション初期化
+# ==========================================
+def init_session():
+    defaults = {
+        "records": [],
+        "saved_images": {},       # filename -> bytes
+        "keep_images": False,     # 軽量化画像をZIP同梱するか
+        "processed_hashes": set(),
+        "last_status": None,      # ("success" | "warning" | "error", msg)
+        "cached_zip_bytes": None,
+        "cached_zip_name": "",
+        "cached_excel_bytes": None,
+        "cached_excel_name": "",
     }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-    .block-container {
-        padding-top: 1rem !important;
-        padding-bottom: 2.5rem !important;
-    }
+init_session()
 
-    h1 {
-        font-size: 1.45rem !important;
-        line-height: 1.25 !important;
-        margin-top: 0 !important;
-        margin-bottom: 0.25rem !important;
-    }
-    h2, h3 {
-        font-size: 1.12rem !important;
-        margin-top: 0.9rem !important;
-        margin-bottom: 0.4rem !important;
-    }
+# ==========================================
+# 3. 認証・パスコードチェック（Stripe決済後URL/コード対応）
+# ==========================================
+def check_access():
+    valid_code = st.secrets.get("ACCESS_CODE", "")
+    if not valid_code:
+        return True  # 未設定時はそのまま許可
 
-    [data-testid="stDataFrame"] table {
-        font-size: 0.95rem !important;
-    }
+    query_code = st.query_params.get("code", "")
+    if query_code == valid_code:
+        st.session_state["authenticated"] = True
 
-    .stButton > button, .stDownloadButton > button, .stLinkButton > a {
-        border-radius: 8px;
-    }
-    div[data-testid="stVerticalBlockBorderWrapper"] {
-        border-radius: 10px;
-    }
+    if st.session_state.get("authenticated"):
+        return True
 
-    /* カメラモニターと撮影ボタンの間隔を1行以上確保 */
-    [data-testid="stCameraInput"] video,
-    [data-testid="stCameraInput"] canvas,
-    [data-testid="stCameraInput"] img {
-        margin-bottom: 1.35rem !important;
-    }
-    [data-testid="stCameraInput"] > div > div:last-child {
-        margin-top: 0.6rem !important;
-    }
+    st.title("🧾 撮るだけ確定申告 Pro")
+    st.info("ご利用には専用パスコードが必要です。決済完了メールに記載のリンクからアクセスするか、パスコードを入力してください。")
+    input_code = st.text_input("パスコード", type="password")
+    if st.button("ロック解除", use_container_width=True, type="primary"):
+        if input_code.strip() == valid_code:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("パスコードが一致しません。")
+    return False
 
-    /* 撮影ボタンの太さ（高さ）を約2倍にし、「Take Photo」を「撮影」に置換 */
-    [data-testid="stCameraInput"] button {
-        min-height: 4.8rem !important;
-        height: 4.8rem !important;
-        font-size: 0 !important;
-        line-height: 0 !important;
-        border-radius: 10px !important;
-        font-weight: 600 !important;
-    }
-    [data-testid="stCameraInput"] button::after {
-        content: "撮影";
-        font-size: 1.05rem !important;
-        line-height: 1.2 !important;
-        letter-spacing: 0.08em;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+if not check_access():
+    st.stop()
 
-
-def get_secret(key: str, default: str = "") -> str:
-    try:
-        return st.secrets.get(key, os.environ.get(key, default))
-    except Exception:
-        return os.environ.get(key, default)
-
-
-api_key = get_secret("GEMINI_API_KEY", "")
-PRO_PASSCODE = get_secret("PRO_PASSCODE", "KAKUTEI2026")
-STRIPE_URL = get_secret("STRIPE_URL", "https://buy.stripe.com/test_your_link_here")
-MODEL_NAME = get_secret("GEMINI_MODEL", "gemini-3.1-flash-lite")
-
-# セッション状態の初期化（クリアを押すまで保持）
-if "expenses_df" not in st.session_state:
-    st.session_state.expenses_df = pd.DataFrame(columns=COLUMNS)
-if "processed_hashes" not in st.session_state:
-    st.session_state.processed_hashes = set()
-if "is_pro" not in st.session_state:
-    st.session_state.is_pro = False
-if "last_messages" not in st.session_state:
-    st.session_state.last_messages = []
-if "keep_light_images" not in st.session_state:
-    st.session_state.keep_light_images = False
-if "light_images" not in st.session_state:
-    st.session_state.light_images = []  # [{"filename": str, "bytes": bytes}]
-if "cached_excel" not in st.session_state:
-    st.session_state.cached_excel = None
-if "cached_zip" not in st.session_state:
-    st.session_state.cached_zip = None
-if "downloaded_info" not in st.session_state:
-    st.session_state.downloaded_info = ""
-
-# 専用URL（?code=〇〇）による自動ロック解除
-try:
-    url_code = st.query_params.get("code", "")
-    if isinstance(url_code, list):
-        url_code = url_code[0] if url_code else ""
-    if url_code and url_code.strip() == PRO_PASSCODE:
-        st.session_state.is_pro = True
-except Exception:
-    pass
-
-# サイドバー：プラン管理・パスコード解除
-with st.sidebar:
-    st.header("プラン・ロック解除")
-    if st.session_state.is_pro:
-        st.success("Pro版（無制限）が有効です")
-        st.caption("この画面をスマホの「ホーム画面に追加」しておくと、次回から1タップでPro版が開きます。")
-    else:
-        used_count = len(st.session_state.expenses_df)
-        st.info(f"無料お試し中：{used_count} / {FREE_LIMIT} 枚")
-        st.link_button("Pro版を購入して無制限にする", STRIPE_URL, type="primary", use_container_width=True)
-        st.markdown("---")
-        input_code = st.text_input("購入後のパスコードを入力", type="password", placeholder="パスコード")
-        if st.button("ロック解除", use_container_width=True):
-            if input_code.strip() == PRO_PASSCODE:
-                st.session_state.is_pro = True
-                st.query_params["code"] = PRO_PASSCODE
-                st.rerun()
-            else:
-                st.error("パスコードが正しくありません。")
-
-    st.markdown("---")
-    st.caption("データは「すべてクリア」を押すまで保持されます。サーバーへの永続保存は行いません。")
-
-st.title("撮るだけ確定申告 Pro")
-st.caption("レシートを撮るだけでAIが勘定科目・税率・インボイス番号を自動仕分けし、確定申告用Excelを作成します。")
-
-
-def optimize_image(file_bytes: bytes, max_size: int = 1280) -> bytes:
+# ==========================================
+# 4. 画像軽量化・Excel / 一括ZIP生成ユーティリティ
+# ==========================================
+def optimize_image(file_bytes: bytes, max_px: int = 1280, quality: int = 75) -> bytes:
     img = Image.open(io.BytesIO(file_bytes))
     img = ImageOps.exif_transpose(img)
-    if img.mode != "RGB":
+    if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
-    img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-    img = ImageEnhance.Contrast(img).enhance(1.15)
+    w, h = img.size
+    if max(w, h) > max_px:
+        ratio = max_px / float(max(w, h))
+        img = img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
     out = io.BytesIO()
-    img.save(out, format="JPEG", quality=75, optimize=True)
+    img.save(out, format="JPEG", quality=quality, optimize=True)
     return out.getvalue()
 
+def build_excel_bytes(records: list) -> bytes:
+    df = pd.DataFrame(records)
+    cols = [
+        "日付", "取引先・店名", "勘定科目", "税込金額", "税率(%)",
+        "消費税額", "インボイス番号", "支払方法", "摘要・品目", "画像ファイル名"
+    ]
+    for c in cols:
+        if c not in df.columns:
+            df[c] = ""
+    df = df[cols]
 
-def analyze_receipt(client: genai.Client, model: str, file_bytes: bytes, mime_type: str) -> dict:
-    prompt = f"""
-    あなたは日本の個人事業主・副業の確定申告の専門家です。
-    添付のレシートから以下を抽出し、JSONのみで返してください。
-    - 発生日: YYYY-MM-DD形式（不明なら空文字）
-    - 取引先: 店名・支払先
-    - 勘定科目: {ACCOUNTS} から最適なものを1つ選択
-    - 金額: 合計金額（整数のみ、カンマなし）
-    - 税率: "10%", "8%（軽減）", "対象外" のいずれか
-    - インボイス番号: Tから始まる13桁の番号（なければ空文字）
-    - 備考: 品目や用途の要約（20文字以内）
-    """
-    try:
-        response = client.models.generate_content(
-            model=model,
-            contents=[types.Part.from_bytes(data=file_bytes, mime_type=mime_type), prompt],
-            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
-        )
-        return json.loads(response.text)
-    except APIError as e:
-        if getattr(e, "code", None) == 503 or "503" in str(e) or "UNAVAILABLE" in str(e):
-            time.sleep(0.6)
-            response = client.models.generate_content(
-                model=model,
-                contents=[types.Part.from_bytes(data=file_bytes, mime_type=mime_type), prompt],
-                config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1),
-            )
-            return json.loads(response.text)
-        raise
-
-
-def build_excel_bytes(detail_df: pd.DataFrame, summary_df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        detail_df.to_excel(writer, index=False, sheet_name="経費明細")
-        summary_df.to_excel(writer, index=False, sheet_name="勘定科目別集計")
+        df.to_excel(writer, index=False, sheet_name="経費明細一覧")
+        # 科目別集計シート
+        summary = (
+            df.groupby("勘定科目", as_index=False)["税込金額"]
+            .sum()
+            .sort_values(by="税込金額", ascending=False)
+        )
+        summary.to_excel(writer, index=False, sheet_name="勘定科目別集計")
     return output.getvalue()
 
+def refresh_export_cache():
+    records = st.session_state["records"]
+    if not records:
+        st.session_state["cached_excel_bytes"] = None
+        st.session_state["cached_zip_bytes"] = None
+        return
 
-def build_images_zip(images: list[dict]) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for item in images:
-            zf.writestr(item["filename"], item["bytes"])
-    return buf.getvalue()
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    excel_name = f"kakutei_shinkoku_{ts}.xlsx"
+    excel_bytes = build_excel_bytes(records)
+    st.session_state["cached_excel_bytes"] = excel_bytes
+    st.session_state["cached_excel_name"] = excel_name
 
+    # Excel + 画像を1つのZIPに統合（iOS Safari 1回完結用）
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(excel_name, excel_bytes)
+        if st.session_state["keep_images"] and st.session_state["saved_images"]:
+            for fname, img_bytes in st.session_state["saved_images"].items():
+                zf.writestr(f"receipts/{fname}", img_bytes)
+    st.session_state["cached_zip_bytes"] = zip_buf.getvalue()
+    st.session_state["cached_zip_name"] = f"kakutei_set_{ts}.zip"
 
-def make_summary_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=["勘定科目", "金額"])
-    summary_df = (
-        df.groupby("勘定科目", as_index=False)["金額"]
-        .sum()
-        .sort_values("金額", ascending=False)
-    )
-    total_row = pd.DataFrame([{"勘定科目": "合計", "金額": int(summary_df["金額"].sum())}])
-    return pd.concat([summary_df, total_row], ignore_index=True)
-
-
-def sync_export_cache():
-    df = st.session_state.expenses_df
-    if df.empty:
-        st.session_state.cached_excel = None
-    else:
-        summary_df = make_summary_df(df)
-        st.session_state.cached_excel = {
-            "bytes": build_excel_bytes(df, summary_df),
-            "filename": f"kakutei_shinkoku_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-            "count": len(df),
-            "saved_at": datetime.now().strftime("%H:%M:%S"),
-        }
-
-    imgs = st.session_state.light_images
-    if not imgs:
-        st.session_state.cached_zip = None
-    else:
-        st.session_state.cached_zip = {
-            "bytes": build_images_zip(imgs),
-            "filename": f"receipt_images_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
-            "count": len(imgs),
-        }
-
-
-def render_capacity_notice(total_count: int, image_count: int, keep_images: bool):
-    has_images = keep_images or image_count > 0
-    limit = WARN_LIMIT_WITH_IMAGES if has_images else WARN_LIMIT_TEXT_ONLY
-    if total_count >= limit:
-        if has_images:
-            st.warning(
-                f"登録データが {total_count}件（画像 {image_count}枚）になりました。"
-                "動作を軽く保つため、一度「集計・Excel出力」タブでExcelと画像ZIPをダウンロードし、"
-                "「すべてクリア」で整理するのがおすすめです。"
-            )
-        else:
-            st.warning(
-                f"登録データが {total_count}件 になりました。"
-                "動作を軽く保つため、一度「集計・Excel出力」タブでExcelをダウンロードし、"
-                "「すべてクリア」で整理するのがおすすめです。"
-            )
-
-
-def process_and_append(raw_bytes: bytes, is_pdf: bool = False) -> bool:
-    file_hash = hashlib.md5(raw_bytes).hexdigest()
-    if file_hash in st.session_state.processed_hashes:
-        return False
-
-    if not st.session_state.is_pro and len(st.session_state.expenses_df) >= FREE_LIMIT:
-        st.warning(f"無料お試しの上限（{FREE_LIMIT}枚）に達しました。続けて利用するにはPro版のパスコードを入力してください。")
-        st.link_button("Pro版を購入して無制限にする", STRIPE_URL, type="primary")
-        return False
-
+# ==========================================
+# 5. Gemini API 解析処理（安定・単一モデル＋1回リトライ）
+# ==========================================
+def analyze_receipt(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
+    api_key = st.secrets.get("GEMINI_API_KEY", "")
     if not api_key:
-        st.error("システムエラー：APIキーが設定されていません。管理者にお問い合わせください。")
-        return False
+        raise RuntimeError("GEMINI_API_KEY が設定されていません。")
 
-    with st.spinner("軽量化＆AI解析中..."):
+    client = genai.Client(api_key=api_key)
+    prompt = f"""
+あなたは日本の確定申告・経理実務に精通したAIアシスタントです。
+画像（レシート・領収書・請求書）から以下の項目を抽出し、JSONのみで返してください。
+
+- date: 日付（YYYY-MM-DD形式。不明時は今日の日付）
+- store: 取引先・店舗名
+- category: 勘定科目（次の中から最も適切な1つを選択: {", ".join(ACCOUNT_CATEGORIES)}）
+- amount: 税込合計金額（整数。カンマなし）
+- tax_rate: 主な消費税率（10 または 8 または 0）
+- tax_amount: 消費税額（整数。記載なければ税込金額から逆算）
+- invoice_no: インボイス登録番号（Tから始まる13桁。なければ空文字 ""）
+- payment_method: 支払方法（現金 / クレジットカード / 電子マネー・QR / 振込 / 不明）
+- summary: 購入した主な品目・用途の簡潔な説明
+"""
+
+    response_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "date": {"type": "STRING"},
+            "store": {"type": "STRING"},
+            "category": {"type": "STRING"},
+            "amount": {"type": "INTEGER"},
+            "tax_rate": {"type": "INTEGER"},
+            "tax_amount": {"type": "INTEGER"},
+            "invoice_no": {"type": "STRING"},
+            "payment_method": {"type": "STRING"},
+            "summary": {"type": "STRING"},
+        },
+        "required": ["date", "store", "category", "amount", "tax_rate", "tax_amount", "invoice_no", "payment_method", "summary"],
+    }
+
+    last_err = None
+    for attempt in range(2):  # 503等の一時混雑時のみ1回だけ即リトライ
         try:
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            if is_pdf:
-                send_bytes = raw_bytes
-                mime_type = "application/pdf"
-            else:
-                send_bytes = optimize_image(raw_bytes)
-                mime_type = "image/jpeg"
-
-            client = genai.Client(api_key=api_key)
-            res = analyze_receipt(client, MODEL_NAME, send_bytes, mime_type)
-
-            date_part = (res.get("発生日") or stamp[:8]).replace("-", "")
-            shop_part = (res.get("取引先") or "receipt").replace("/", "_").replace(" ", "")[:12]
-
-            if not is_pdf and st.session_state.keep_light_images:
-                st.session_state.light_images.append({
-                    "filename": f"{date_part}_{shop_part}_{len(st.session_state.light_images)+1:02d}.jpg",
-                    "bytes": send_bytes,
-                })
-
-            new_row = {
-                "登録日時": now_str,
-                "発生日": res.get("発生日", ""),
-                "取引先": res.get("取引先", ""),
-                "勘定科目": res.get("勘定科目", "雑費"),
-                "金額": int(res.get("金額", 0) or 0),
-                "税率": res.get("税率", "10%"),
-                "インボイス番号": res.get("インボイス番号", ""),
-                "備考": res.get("備考", ""),
-            }
-            st.session_state.expenses_df = pd.concat(
-                [pd.DataFrame([new_row]), st.session_state.expenses_df],
-                ignore_index=True
+            res = client.models.generate_content(
+                model=PRIMARY_MODEL,
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                    prompt,
+                ],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=response_schema,
+                    temperature=0.1,
+                ),
             )
-            st.session_state.processed_hashes.add(file_hash)
-            st.session_state.downloaded_info = ""
-            sync_export_cache()
-            st.session_state.last_messages.append(
-                f"登録完了：{new_row['取引先']} / ¥{new_row['金額']:,}（{new_row['勘定科目']}）"
-                f"（現在 {len(st.session_state.expenses_df)} 件登録中）"
-            )
-            return True
+            return json.loads(res.text)
         except Exception as e:
-            st.error(f"解析エラー: {e}")
-            return False
+            last_err = e
+            if attempt == 0:
+                time.sleep(1.5)
+    raise last_err
 
+def process_uploaded_file(uploaded_file):
+    raw_bytes = uploaded_file.getvalue()
+    file_hash = hashlib.sha256(raw_bytes).hexdigest()
+    if file_hash in st.session_state["processed_hashes"]:
+        st.session_state["last_status"] = ("warning", f"「{uploaded_file.name}」はすでに登録済みです。")
+        return
 
-def mark_downloaded(msg: str):
-    st.session_state.downloaded_info = msg
+    is_pdf = uploaded_file.type == "application/pdf" or uploaded_file.name.lower().endswith(".pdf")
+    if is_pdf:
+        send_bytes = raw_bytes
+        mime_type = "application/pdf"
+        ext = "pdf"
+    else:
+        send_bytes = optimize_image(raw_bytes)
+        mime_type = "image/jpeg"
+        ext = "jpg"
 
+    parsed = analyze_receipt(send_bytes, mime_type=mime_type)
 
-tab1, tab2 = st.tabs(["撮って即登録", "集計・Excel出力"])
+    idx = len(st.session_state["records"]) + 1
+    safe_date = parsed.get("date", datetime.now().strftime("%Y-%m-%d")).replace("-", "")
+    saved_filename = f"{safe_date}_{idx:03d}.{ext}" if st.session_state["keep_images"] else ""
+
+    record = {
+        "日付": parsed.get("date", ""),
+        "取引先・店名": parsed.get("store", ""),
+        "勘定科目": parsed.get("category", "雑費"),
+        "税込金額": int(parsed.get("amount", 0)),
+        "税率(%)": int(parsed.get("tax_rate", 10)),
+        "消費税額": int(parsed.get("tax_amount", 0)),
+        "インボイス番号": parsed.get("invoice_no", ""),
+        "支払方法": parsed.get("payment_method", ""),
+        "摘要・品目": parsed.get("summary", ""),
+        "画像ファイル名": saved_filename,
+    }
+
+    st.session_state["records"].append(record)
+    st.session_state["processed_hashes"].add(file_hash)
+
+    if st.session_state["keep_images"]:
+        st.session_state["saved_images"][saved_filename] = send_bytes
+
+    refresh_export_cache()
+    st.session_state["last_status"] = (
+        "success",
+        f"登録完了：{record['日付']} / {record['取引先・店名']} / {record['勘定科目']} / ¥{record['税込金額']:,}"
+    )
+
+# ==========================================
+# 6. UI構成
+# ==========================================
+st.title("🧾 撮るだけ確定申告 Pro")
+st.caption("⚠️ 現在のデータはブラウザの一時メモリに保持されます。ページ再読み込み・再起動でリセットされるため、作業の区切りで必ず「一括ダウンロード」を実行してください。")
+
+# 画像保管スイッチ（上部配置）
+keep_toggle = st.toggle(
+    "レシート画像もZIPに同梱して保管する（オフ時はExcelのみ・高速軽量）",
+    value=st.session_state["keep_images"],
+)
+if keep_toggle != st.session_state["keep_images"]:
+    st.session_state["keep_images"] = keep_toggle
+    if not keep_toggle:
+        st.session_state["saved_images"] = {}
+    refresh_export_cache()
+    st.rerun()
+
+# 件数目安アラート
+count = len(st.session_state["records"])
+limit = WARN_LIMIT_WITH_IMAGES if st.session_state["keep_images"] else WARN_LIMIT_TEXT_ONLY
+if count >= limit:
+    st.warning(f"現在 {count} 件登録されています。動作の安定性を保つため、一度「集計・一括ダウンロード」から保存し、データクリアで区切ることをおすすめします。")
+
+tab1, tab2 = st.tabs([f"📸 撮って即登録 ({count}件)", "📊 集計・一括ダウンロード"])
 
 with tab1:
-    render_capacity_notice(
-        total_count=len(st.session_state.expenses_df),
-        image_count=len(st.session_state.light_images),
-        keep_images=st.session_state.keep_light_images,
-    )
+    cam_file = st.camera_input("レシートを撮影")
+    if cam_file is not None:
+        with st.spinner("AIがレシートを解析中..."):
+            try:
+                process_uploaded_file(cam_file)
+            except Exception as e:
+                st.session_state["last_status"] = ("error", f"読み取りエラーが発生しました（入力済みデータは保護されています）: {e}")
 
-    remaining = FREE_LIMIT - len(st.session_state.expenses_df)
-    if not st.session_state.is_pro:
-        if remaining > 0:
-            st.info(f"無料お試し：あと {remaining} 枚 登録できます（4枚目以降はPro版で無制限）")
-        else:
-            st.warning("無料お試し枠（3枚）を使い切りました。左上の「>」からPro版へアップグレードしてください。")
-            st.link_button("Pro版を購入して無制限にする", STRIPE_URL, type="primary")
-    else:
-        st.caption("ブラウザの共有メニューから「ホーム画面に追加」しておくと、次回から1タップで開けます。")
-
-    keep_img_toggle = st.toggle(
-        "軽量化したレシート画像もZIP用に保管する（目安：150件まで / オフ時は300件まで）",
-        value=st.session_state.keep_light_images,
-    )
-    if keep_img_toggle != st.session_state.keep_light_images:
-        st.session_state.keep_light_images = keep_img_toggle
-        if not keep_img_toggle and st.session_state.light_images:
-            st.session_state.light_images = []
-        sync_export_cache()
-        st.rerun()
-
-    cam_img = st.camera_input("レシートを撮影")
-    if cam_img is not None:
-        if process_and_append(cam_img.getvalue(), is_pdf=False):
-            st.rerun()
-
-    # 撮影ボタンのすぐ下に登録結果・案内を表示
-    if st.session_state.last_messages:
-        for msg in st.session_state.last_messages:
-            st.success(msg)
-        st.caption("続けて次を撮影するか、上の「集計・Excel出力」タブから確認・保存できます。")
-        st.session_state.last_messages = []
-
-    st.markdown("---")
     up_files = st.file_uploader(
-        "写真ライブラリ（HEIC/JPG/PNG）やPDFからまとめて登録",
-        type=["heic", "heif", "jpg", "jpeg", "png", "pdf"],
+        "または画像・PDFを選択（複数可）",
+        type=["jpg", "jpeg", "png", "webp", "heic", "pdf"],
         accept_multiple_files=True,
     )
     if up_files:
-        added_any = False
         for f in up_files:
-            if process_and_append(f.getvalue(), is_pdf=f.name.lower().endswith(".pdf")):
-                added_any = True
-        if added_any:
-            st.rerun()
+            f_hash = hashlib.sha256(f.getvalue()).hexdigest()
+            if f_hash not in st.session_state["processed_hashes"]:
+                with st.spinner(f"解析中: {f.name}"):
+                    try:
+                        process_uploaded_file(f)
+                    except Exception as e:
+                        st.session_state["last_status"] = ("error", f"{f.name} の読み取りエラー: {e}")
+
+    # 撮影ボタンすぐ下にステータス表示
+    if st.session_state["last_status"]:
+        level, msg = st.session_state["last_status"]
+        if level == "success":
+            st.success(msg)
+        elif level == "warning":
+            st.warning(msg)
+        else:
+            st.error(msg)
 
 with tab2:
-    df = st.session_state.expenses_df
-
-    if st.session_state.downloaded_info:
-        st.success(f"{st.session_state.downloaded_info}（現在の登録件数：{len(df)}件）")
-        st.caption("続けて撮影・登録したい場合は、上の「撮って即登録」タブをタップしてください。")
-
-    render_capacity_notice(
-        total_count=len(df),
-        image_count=len(st.session_state.light_images),
-        keep_images=st.session_state.keep_light_images,
-    )
-
-    if st.session_state.cached_excel is not None:
-        cached = st.session_state.cached_excel
-        with st.container(border=True):
-            st.caption(
-                f"一時保管中のExcelあり（作成：{cached['saved_at']} / {cached['count']}件）。"
-                "ダウンロードに失敗した場合や再取得したい場合はこちらからどうぞ。"
-            )
-            st.download_button(
-                label=f"一時保管中のExcelを再ダウンロード（{cached['filename']}）",
-                data=cached["bytes"],
-                file_name=cached["filename"],
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="redownload_cached_excel",
-                on_click=mark_downloaded,
-                args=("一時保管中のExcelをダウンロードしました",),
-            )
-
-    if df.empty:
-        st.info("まだ登録されたレシートがありません。「撮って即登録」から撮影またはアップロードしてください。")
+    if not st.session_state["records"]:
+        st.info("まだ登録データがありません。「撮って即登録」タブからレシートを登録してください。")
     else:
-        st.subheader(f"経費明細の確認・修正（全 {len(df)} 件）")
+        df_current = pd.DataFrame(st.session_state["records"])
+        total_amt = int(df_current["税込金額"].sum())
+        c1, c2 = st.columns(2)
+        c1.metric("登録件数", f"{len(df_current)} 件")
+        c2.metric("税込合計金額", f"¥{total_amt:,}")
+
+        st.subheader("登録明細（直接編集可能）")
         edited_df = st.data_editor(
-            df,
+            df_current,
             num_rows="dynamic",
             use_container_width=True,
-            key="expenses_editor",
-            column_config={
-                "金額": st.column_config.NumberColumn("金額（円）", format="%d"),
-                "勘定科目": st.column_config.SelectboxColumn("勘定科目", options=ACCOUNTS),
-                "税率": st.column_config.SelectboxColumn("税率", options=["10%", "8%（軽減）", "対象外"]),
-            },
+            key="records_editor",
         )
-        if not edited_df.equals(df):
-            st.session_state.expenses_df = edited_df
-            sync_export_cache()
-
-        summary_df = make_summary_df(st.session_state.expenses_df)
-
-        st.subheader("勘定科目別 集計")
-        st.dataframe(
-            summary_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "勘定科目": st.column_config.TextColumn("勘定科目", width="medium"),
-                "金額": st.column_config.NumberColumn("合計金額（円）", format="¥%d", width="medium"),
-            },
-        )
-
-        if st.session_state.cached_excel is None:
-            sync_export_cache()
-
-        cached_excel = st.session_state.cached_excel
-        if cached_excel is not None:
-            st.download_button(
-                label="確定申告用 Excel (.xlsx) をダウンロード",
-                data=cached_excel["bytes"],
-                file_name=cached_excel["filename"],
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                key="main_download_excel",
-                on_click=mark_downloaded,
-                args=("確定申告用 Excel (.xlsx) をダウンロードしました",),
-            )
-
-        cached_zip = st.session_state.cached_zip
-        if cached_zip is not None:
-            st.download_button(
-                label=f"軽量化レシート画像をまとめて保存（{cached_zip['count']}枚・ZIP）",
-                data=cached_zip["bytes"],
-                file_name=cached_zip["filename"],
-                mime="application/zip",
-                key="download_light_images_zip",
-                on_click=mark_downloaded,
-                args=(f"軽量化レシート画像ZIP（{cached_zip['count']}枚）をダウンロードしました",),
-            )
-
-        st.markdown("---")
-        if st.button("現在のデータをすべてクリア"):
-            st.session_state.expenses_df = pd.DataFrame(columns=COLUMNS)
-            st.session_state.processed_hashes = set()
-            st.session_state.light_images = []
-            st.session_state.cached_excel = None
-            st.session_state.cached_zip = None
-            st.session_state.downloaded_info = ""
+        if not edited_df.equals(df_current):
+            st.session_state["records"] = edited_df.to_dict(orient="records")
+            refresh_export_cache()
             st.rerun()
 
-st.markdown("---")
-st.caption(
-    "※免責事項：本ツールはAIによる自動仕分け支援ツールです。最終的な税務申告の内容・勘定科目の妥当性については、必ずご自身または税理士にご確認ください。"
-    "アップロードされた画像およびデータは解析後に即時破棄され、サーバーには一切保存されません。"
-)
+        st.divider()
+        st.subheader("1回完結ダウンロード（iPhone / PC対応）")
+        if st.session_state["keep_images"]:
+            st.caption("Excel（.xlsx）と軽量化レシート画像（receiptsフォルダ）を1つのZIPにまとめて保存します。iPhoneでは「その他...」→「“ファイル”に保存」を選んでください。")
+            if st.session_state["cached_zip_bytes"]:
+                st.download_button(
+                    label="📦 Excel＋画像を1つのZIPで一括ダウンロード",
+                    data=st.session_state["cached_zip_bytes"],
+                    file_name=st.session_state["cached_zip_name"],
+                    mime="application/zip",
+                    type="primary",
+                    use_container_width=True,
+                )
+        else:
+            st.caption("画像保管がオフのため、Excel（.xlsx）のみをダウンロードします。")
+            if st.session_state["cached_excel_bytes"]:
+                st.download_button(
+                    label="📥 確定申告用Excelをダウンロード (.xlsx)",
+                    data=st.session_state["cached_excel_bytes"],
+                    file_name=st.session_state["cached_excel_name"],
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+        st.divider()
+        if st.button("🗑️ 保存完了後にデータをすべてクリア", use_container_width=True):
+            st.session_state["records"] = []
+            st.session_state["saved_images"] = {}
+            st.session_state["processed_hashes"] = set()
+            st.session_state["cached_excel_bytes"] = None
+            st.session_state["cached_zip_bytes"] = None
+            st.session_state["last_status"] = ("warning", "すべてのデータをクリアしました。")
+            st.rerun()
