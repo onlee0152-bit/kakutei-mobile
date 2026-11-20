@@ -1,3 +1,4 @@
+import re
 import streamlit as st
 import pandas as pd
 import io
@@ -15,10 +16,14 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# タイトルサイズ調整のみ（カメラボタンは重なり・崩れを防ぐため無理な擬似要素や過剰なサイズ変更をしない）
 st.markdown(
     """
     <style>
+    [data-testid="stToolbar"],
+    [data-testid="stDecoration"],
+    .stDeployButton {
+        display: none !important;
+    }
     .app-main-title {
         font-size: 1.45rem;
         font-weight: 700;
@@ -26,12 +31,27 @@ st.markdown(
         margin: 0.2rem 0 0.4rem 0;
         color: inherit;
     }
+    div[data-testid="stCameraInput"] button[kind="secondary"] {
+        font-size: 0 !important;
+        padding: 0.75rem 1.6rem !important;
+        min-height: 3.4rem !important;
+        min-width: 7.5rem !important;
+        border-radius: 10px !important;
+        cursor: pointer !important;
+    }
+    div[data-testid="stCameraInput"] button[kind="secondary"]::after {
+        content: "撮影";
+        font-size: 1.3rem !important;
+        font-weight: 700 !important;
+        line-height: 1.2 !important;
+        display: inline-block !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-MODEL_NAME = st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")
+MODEL_NAME = st.secrets.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 WARN_LIMIT_TEXT_ONLY = 300
 WARN_LIMIT_WITH_IMAGES = 150
 
@@ -40,6 +60,25 @@ ACCOUNT_CATEGORIES = [
     "水道光熱費", "地代家賃", "新聞図書費", "広告宣伝費", "車両費",
     "支払手数料", "外注工賃", "修繕費", "租税公課", "雑費",
 ]
+
+
+@st.cache_resource
+def get_genai_client(api_key: str) -> genai.Client:
+    return genai.Client(api_key=api_key)
+
+
+def parse_int_amount(val) -> int:
+    if val is None:
+        return 0
+    if isinstance(val, (int, float)):
+        return int(round(val))
+    cleaned = re.sub(r"[^\d\-]", "", str(val))
+    if not cleaned or cleaned == "-":
+        return 0
+    try:
+        return int(cleaned)
+    except ValueError:
+        return 0
 
 
 def init_session():
@@ -53,6 +92,7 @@ def init_session():
         "cached_zip_name": "",
         "cached_excel_bytes": None,
         "cached_excel_name": "",
+        "last_processed_cam_digest": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -155,14 +195,15 @@ def analyze_receipt(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY が設定されていません。")
 
-    client = genai.Client(api_key=api_key)
+    client = get_genai_client(api_key)
     prompt = f"""
 画像（レシート・領収書・請求書）から以下の項目を抽出し、JSONのみで返してください。
+合計金額（税込）は必ずレシートの合計・お支払い合計・請求合計の数値を抽出してください。
 
 - date: 日付（YYYY-MM-DD形式。不明時は今日の日付）
 - store: 取引先・店舗名
 - category: 勘定科目（次の中から最も適切な1つを選択: {", ".join(ACCOUNT_CATEGORIES)}）
-- amount: 税込合計金額（整数。カンマなし）
+- amount: 税込合計金額（整数）
 - tax_rate: 主な消費税率（10 または 8 または 0）
 - tax_amount: 消費税額（整数。記載なければ税込金額から逆算）
 - invoice_no: インボイス登録番号（Tから始まる13桁。なければ空文字 ""）
@@ -198,7 +239,7 @@ def analyze_receipt(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=response_schema,
-            temperature=0.1,
+            temperature=0.0,
         ),
     )
     return json.loads(res.text)
@@ -227,13 +268,17 @@ def process_uploaded_file(uploaded_file):
     safe_date = str(parsed.get("date", datetime.now().strftime("%Y-%m-%d"))).replace("-", "")
     saved_filename = f"{safe_date}_{idx:03d}.{ext}" if st.session_state["keep_images"] else ""
 
+    amount_val = parse_int_amount(parsed.get("amount", 0))
+    tax_rate_val = parse_int_amount(parsed.get("tax_rate", 10)) or 10
+    tax_amount_val = parse_int_amount(parsed.get("tax_amount", 0))
+
     record = {
         "日付": parsed.get("date", ""),
         "取引先・店名": parsed.get("store", ""),
         "勘定科目": parsed.get("category", "雑費"),
-        "税込金額": int(parsed.get("amount", 0) or 0),
-        "税率(%)": int(parsed.get("tax_rate", 10) or 10),
-        "消費税額": int(parsed.get("tax_amount", 0) or 0),
+        "税込金額": amount_val,
+        "税率(%)": tax_rate_val,
+        "消費税額": tax_amount_val,
         "インボイス番号": parsed.get("invoice_no", ""),
         "支払方法": parsed.get("payment_method", ""),
         "摘要・品目": parsed.get("summary", ""),
@@ -275,13 +320,16 @@ if count >= limit:
 tab1, tab2 = st.tabs([f"撮って即登録 ({count}件)", "集計・一括ダウンロード"])
 
 with tab1:
-    cam_file = st.camera_input("レシート撮影")
+    cam_file = st.camera_input("レシート撮影", key="main_camera_input")
     if cam_file is not None:
-        cam_hash = hashlib.sha256(cam_file.getvalue()).hexdigest()
-        if cam_hash not in st.session_state["processed_hashes"]:
+        cam_bytes = cam_file.getvalue()
+        cam_digest = hashlib.sha256(cam_bytes).hexdigest()
+        if cam_digest != st.session_state["last_processed_cam_digest"]:
             with st.spinner("AIがレシートを解析中..."):
                 try:
                     process_uploaded_file(cam_file)
+                    st.session_state["last_processed_cam_digest"] = cam_digest
+                    st.rerun()
                 except Exception as e:
                     st.session_state["last_status"] = ("error", f"読み取りエラーが発生しました（入力済みデータは保護されています）: {e}")
 
@@ -363,5 +411,6 @@ with tab2:
             st.session_state["processed_hashes"] = set()
             st.session_state["cached_excel_bytes"] = None
             st.session_state["cached_zip_bytes"] = None
+            st.session_state["last_processed_cam_digest"] = ""
             st.session_state["last_status"] = ("warning", "すべてのデータをクリアしました。")
             st.rerun()
