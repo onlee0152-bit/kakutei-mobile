@@ -262,10 +262,12 @@ def build_bundle_zip(excel_bytes: bytes, excel_filename: str, images: list[dict]
 
 
 def make_summary_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
+    if not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame(columns=["勘定科目", "金額"])
+    work_df = df.copy()
+    work_df["金額"] = work_df["金額"].apply(clean_amount)
     summary_df = (
-        df.groupby("勘定科目", as_index=False)["金額"]
+        work_df.groupby("勘定科目", as_index=False)["金額"]
         .sum()
         .sort_values("金額", ascending=False)
     )
@@ -496,5 +498,60 @@ with tab2:
             sync_export_cache()
 
         summary_df = make_summary_df(st.session_state.expenses_df)
+        if not isinstance(summary_df, pd.DataFrame):
+            summary_df = make_summary_df(pd.DataFrame(columns=COLUMNS))
 
-        st
+        st.subheader("勘定科目別 集計")
+        st.dataframe(
+            summary_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "勘定科目": st.column_config.TextColumn("勘定科目", width="medium"),
+                "金額": st.column_config.NumberColumn("合計金額（円）", format="¥%d", width="medium"),
+            },
+        )
+
+        if st.session_state.cached_excel is None:
+            sync_export_cache()
+
+        cached_zip = st.session_state.cached_zip
+        cached_excel = st.session_state.cached_excel
+        if cached_zip is not None:
+            st.download_button(
+                label=f"確定申告用 Excel＋レシート画像をまとめて保存（{cached_zip['count']}枚・ZIP）",
+                data=cached_zip["bytes"],
+                file_name=cached_zip["filename"],
+                mime="application/zip",
+                type="primary",
+                key="download_bundle_zip",
+                on_click=mark_downloaded,
+                args=(f"Excel＋レシート画像ZIP（{cached_zip['count']}枚）をダウンロードしました",),
+            )
+        elif cached_excel is not None:
+            st.download_button(
+                label="確定申告用 Excel (.xlsx) をダウンロード",
+                data=cached_excel["bytes"],
+                file_name=cached_excel["filename"],
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                key="main_download_excel",
+                on_click=mark_downloaded,
+                args=("確定申告用 Excel (.xlsx) をダウンロードしました",),
+            )
+
+        st.markdown("---")
+        if st.button("現在のデータをすべてクリア"):
+            st.session_state.expenses_df = pd.DataFrame(columns=COLUMNS)
+            st.session_state.processed_hashes = set()
+            st.session_state.light_images = []
+            st.session_state.cached_excel = None
+            st.session_state.cached_zip = None
+            st.session_state.downloaded_info = ""
+            st.rerun()
+
+st.markdown("---")
+st.caption(
+    "※免責事項：本ツールはAIによる自動仕分け支援ツールです。最終的な税務申告の内容・勘定科目の妥当性については、必ずご自身または税理士にご確認ください。"
+    "アップロードされた画像およびデータは解析後に即時破棄され、サーバーには一切保存されません。"
+)
