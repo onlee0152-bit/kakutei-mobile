@@ -10,54 +10,57 @@ from PIL import Image, ImageOps
 from google import genai
 from google.genai import types
 
-# ==========================================
-# 1. ページ設定・基本定数
-# ==========================================
 st.set_page_config(
     page_title="撮るだけ確定申告 Pro",
     page_icon="🧾",
     layout="centered",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed",
 )
 
-PRIMARY_MODEL = "gemini-2.5-flash"
+# st.secrets に GEMINI_MODEL があればそれを優先し、なければエラー案内順で試行
+DEFAULT_MODELS = [
+    st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash"),
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+]
+# 重複を除去しつつ順序維持
+CANDIDATE_MODELS = list(dict.fromkeys([m for m in DEFAULT_MODELS if m]))
+
 WARN_LIMIT_TEXT_ONLY = 300
 WARN_LIMIT_WITH_IMAGES = 150
 
 ACCOUNT_CATEGORIES = [
     "消耗品費", "旅費交通費", "接待交際費", "会議費", "通信費",
     "水道光熱費", "地代家賃", "新聞図書費", "広告宣伝費", "車両費",
-    "支払手数料", "外注工賃", "修繕費", "租税公課", "雑費"
+    "支払手数料", "外注工賃", "修繕費", "租税公課", "雑費",
 ]
 
-# ==========================================
-# 2. セッション初期化
-# ==========================================
+
 def init_session():
     defaults = {
         "records": [],
-        "saved_images": {},       # filename -> bytes
-        "keep_images": False,     # 軽量化画像をZIP同梱するか
+        "saved_images": {},
+        "keep_images": False,
         "processed_hashes": set(),
-        "last_status": None,      # ("success" | "warning" | "error", msg)
+        "last_status": None,
         "cached_zip_bytes": None,
         "cached_zip_name": "",
         "cached_excel_bytes": None,
         "cached_excel_name": "",
+        "camera_reset_key": 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
+
 init_session()
 
-# ==========================================
-# 3. 認証・パスコードチェック（Stripe決済後URL/コード対応）
-# ==========================================
+
 def check_access():
     valid_code = st.secrets.get("ACCESS_CODE", "")
     if not valid_code:
-        return True  # 未設定時はそのまま許可
+        return True
 
     query_code = st.query_params.get("code", "")
     if query_code == valid_code:
@@ -67,7 +70,7 @@ def check_access():
         return True
 
     st.title("🧾 撮るだけ確定申告 Pro")
-    st.info("ご利用には専用パスコードが必要です。決済完了メールに記載のリンクからアクセスするか、パスコードを入力してください。")
+    st.info("ご利用には専用パスコードが必要です。決済完了メールのリンクまたはパスコードを入力してください。")
     input_code = st.text_input("パスコード", type="password")
     if st.button("ロック解除", use_container_width=True, type="primary"):
         if input_code.strip() == valid_code:
@@ -77,12 +80,11 @@ def check_access():
             st.error("パスコードが一致しません。")
     return False
 
+
 if not check_access():
     st.stop()
 
-# ==========================================
-# 4. 画像軽量化・Excel / 一括ZIP生成ユーティリティ
-# ==========================================
+
 def optimize_image(file_bytes: bytes, max_px: int = 1280, quality: int = 75) -> bytes:
     img = Image.open(io.BytesIO(file_bytes))
     img = ImageOps.exif_transpose(img)
@@ -96,11 +98,12 @@ def optimize_image(file_bytes: bytes, max_px: int = 1280, quality: int = 75) -> 
     img.save(out, format="JPEG", quality=quality, optimize=True)
     return out.getvalue()
 
+
 def build_excel_bytes(records: list) -> bytes:
     df = pd.DataFrame(records)
     cols = [
         "日付", "取引先・店名", "勘定科目", "税込金額", "税率(%)",
-        "消費税額", "インボイス番号", "支払方法", "摘要・品目", "画像ファイル名"
+        "消費税額", "インボイス番号", "支払方法", "摘要・品目", "画像ファイル名",
     ]
     for c in cols:
         if c not in df.columns:
@@ -110,7 +113,6 @@ def build_excel_bytes(records: list) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="経費明細一覧")
-        # 科目別集計シート
         summary = (
             df.groupby("勘定科目", as_index=False)["税込金額"]
             .sum()
@@ -118,6 +120,7 @@ def build_excel_bytes(records: list) -> bytes:
         )
         summary.to_excel(writer, index=False, sheet_name="勘定科目別集計")
     return output.getvalue()
+
 
 def refresh_export_cache():
     records = st.session_state["records"]
@@ -132,7 +135,6 @@ def refresh_export_cache():
     st.session_state["cached_excel_bytes"] = excel_bytes
     st.session_state["cached_excel_name"] = excel_name
 
-    # Excel + 画像を1つのZIPに統合（iOS Safari 1回完結用）
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(excel_name, excel_bytes)
@@ -142,9 +144,7 @@ def refresh_export_cache():
     st.session_state["cached_zip_bytes"] = zip_buf.getvalue()
     st.session_state["cached_zip_name"] = f"kakutei_set_{ts}.zip"
 
-# ==========================================
-# 5. Gemini API 解析処理（安定・単一モデル＋1回リトライ）
-# ==========================================
+
 def analyze_receipt(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
     api_key = st.secrets.get("GEMINI_API_KEY", "")
     if not api_key:
@@ -179,30 +179,39 @@ def analyze_receipt(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
             "payment_method": {"type": "STRING"},
             "summary": {"type": "STRING"},
         },
-        "required": ["date", "store", "category", "amount", "tax_rate", "tax_amount", "invoice_no", "payment_method", "summary"],
+        "required": [
+            "date", "store", "category", "amount", "tax_rate",
+            "tax_amount", "invoice_no", "payment_method", "summary",
+        ],
     }
 
     last_err = None
-    for attempt in range(2):  # 503等の一時混雑時のみ1回だけ即リトライ
-        try:
-            res = client.models.generate_content(
-                model=PRIMARY_MODEL,
-                contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                    prompt,
-                ],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=response_schema,
-                    temperature=0.1,
-                ),
-            )
-            return json.loads(res.text)
-        except Exception as e:
-            last_err = e
-            if attempt == 0:
-                time.sleep(1.5)
+    for model_name in CANDIDATE_MODELS:
+        for attempt in range(2):
+            try:
+                res = client.models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                        prompt,
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=response_schema,
+                        temperature=0.1,
+                    ),
+                )
+                return json.loads(res.text)
+            except Exception as e:
+                last_err = e
+                msg = str(e)
+                # 404 の場合はこのモデル名が使えないため次の候補モデルへ即移る
+                if "404" in msg or "NOT_FOUND" in msg:
+                    break
+                if attempt == 0:
+                    time.sleep(1.2)
     raise last_err
+
 
 def process_uploaded_file(uploaded_file):
     raw_bytes = uploaded_file.getvalue()
@@ -224,16 +233,16 @@ def process_uploaded_file(uploaded_file):
     parsed = analyze_receipt(send_bytes, mime_type=mime_type)
 
     idx = len(st.session_state["records"]) + 1
-    safe_date = parsed.get("date", datetime.now().strftime("%Y-%m-%d")).replace("-", "")
+    safe_date = str(parsed.get("date", datetime.now().strftime("%Y-%m-%d"))).replace("-", "")
     saved_filename = f"{safe_date}_{idx:03d}.{ext}" if st.session_state["keep_images"] else ""
 
     record = {
         "日付": parsed.get("date", ""),
         "取引先・店名": parsed.get("store", ""),
         "勘定科目": parsed.get("category", "雑費"),
-        "税込金額": int(parsed.get("amount", 0)),
-        "税率(%)": int(parsed.get("tax_rate", 10)),
-        "消費税額": int(parsed.get("tax_amount", 0)),
+        "税込金額": int(parsed.get("amount", 0) or 0),
+        "税率(%)": int(parsed.get("tax_rate", 10) or 10),
+        "消費税額": int(parsed.get("tax_amount", 0) or 0),
         "インボイス番号": parsed.get("invoice_no", ""),
         "支払方法": parsed.get("payment_method", ""),
         "摘要・品目": parsed.get("summary", ""),
@@ -249,16 +258,13 @@ def process_uploaded_file(uploaded_file):
     refresh_export_cache()
     st.session_state["last_status"] = (
         "success",
-        f"登録完了：{record['日付']} / {record['取引先・店名']} / {record['勘定科目']} / ¥{record['税込金額']:,}"
+        f"登録完了：{record['日付']} / {record['取引先・店名']} / {record['勘定科目']} / ¥{record['税込金額']:,}",
     )
 
-# ==========================================
-# 6. UI構成
-# ==========================================
+
 st.title("🧾 撮るだけ確定申告 Pro")
 st.caption("⚠️ 現在のデータはブラウザの一時メモリに保持されます。ページ再読み込み・再起動でリセットされるため、作業の区切りで必ず「一括ダウンロード」を実行してください。")
 
-# 画像保管スイッチ（上部配置）
 keep_toggle = st.toggle(
     "レシート画像もZIPに同梱して保管する（オフ時はExcelのみ・高速軽量）",
     value=st.session_state["keep_images"],
@@ -270,7 +276,6 @@ if keep_toggle != st.session_state["keep_images"]:
     refresh_export_cache()
     st.rerun()
 
-# 件数目安アラート
 count = len(st.session_state["records"])
 limit = WARN_LIMIT_WITH_IMAGES if st.session_state["keep_images"] else WARN_LIMIT_TEXT_ONLY
 if count >= limit:
@@ -279,16 +284,21 @@ if count >= limit:
 tab1, tab2 = st.tabs([f"📸 撮って即登録 ({count}件)", "📊 集計・一括ダウンロード"])
 
 with tab1:
-    cam_file = st.camera_input("レシートを撮影")
+    cam_file = st.camera_input(
+        "📷 レシート撮影",
+        key=f"camera_input_{st.session_state['camera_reset_key']}",
+    )
     if cam_file is not None:
         with st.spinner("AIがレシートを解析中..."):
             try:
                 process_uploaded_file(cam_file)
+                st.session_state["camera_reset_key"] += 1
+                st.rerun()
             except Exception as e:
                 st.session_state["last_status"] = ("error", f"読み取りエラーが発生しました（入力済みデータは保護されています）: {e}")
 
     up_files = st.file_uploader(
-        "または画像・PDFを選択（複数可）",
+        "📁 または画像・PDFを選択（複数可）",
         type=["jpg", "jpeg", "png", "webp", "heic", "pdf"],
         accept_multiple_files=True,
     )
@@ -302,7 +312,6 @@ with tab1:
                     except Exception as e:
                         st.session_state["last_status"] = ("error", f"{f.name} の読み取りエラー: {e}")
 
-    # 撮影ボタンすぐ下にステータス表示
     if st.session_state["last_status"]:
         level, msg = st.session_state["last_status"]
         if level == "success":
