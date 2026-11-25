@@ -19,20 +19,21 @@ st.set_page_config(
 st.markdown(
     """
     <style>
+    [data-testid="stHeader"],
+    [data-testid="stToolbar"],
+    #MainMenu,
+    footer {
+        display: none !important;
+    }
     .block-container {
-        padding-top: 0.6rem !important;
+        padding-top: 1.2rem !important;
         padding-bottom: 1.5rem !important;
     }
-    [data-testid="stCameraInput"] button {
+    [data-testid="stCameraInput"] > div > button {
         font-size: 0 !important;
         line-height: 0 !important;
-        min-height: 64px !important;
-        padding: 12px 24px !important;
-        display: inline-flex !important;
-        align-items: center !important;
-        justify-content: center !important;
     }
-    [data-testid="stCameraInput"] button::after {
+    [data-testid="stCameraInput"] > div > button::after {
         content: "⭕️";
         font-size: 40px !important;
         line-height: 1 !important;
