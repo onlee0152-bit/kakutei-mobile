@@ -75,9 +75,9 @@ def init_session():
         "zip_name": "",
         "excel_bytes": None,
         "excel_name": "",
-        "cam_key": 0,
+        "last_cam_digest": None,
         "up_key": 0,
-        "camera_facing": "environment",  # 1.背面優先 -> 2.背面初期 -> 3.ユーザー選択維持
+        "camera_facing": "environment",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -100,7 +100,7 @@ sync_pro_status()
 
 def apply_camera_facing_preference(facing: str):
     """
-    1. 背面カメラ(environment)を優先要求
+    1. 背面カメラ(environment)を優先指定
     2. 不可時は背面前提を維持
     3. ユーザーが選んだカメラ(user / environment)を維持
     """
@@ -109,11 +109,12 @@ def apply_camera_facing_preference(facing: str):
         <script>
         (function() {{
             const preferredFacing = "{facing}";
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
-            const origGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-            if (navigator.mediaDevices._kakuteiPatched) return;
-            navigator.mediaDevices._kakuteiPatched = true;
-            navigator.mediaDevices.getUserMedia = function(constraints) {{
+            const mediaDevices = (navigator.mediaDevices) || (window.parent && window.parent.navigator && window.parent.navigator.mediaDevices);
+            if (!mediaDevices || !mediaDevices.getUserMedia) return;
+            const origGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+            if (mediaDevices._kakuteiPatched) return;
+            mediaDevices._kakuteiPatched = true;
+            mediaDevices.getUserMedia = function(constraints) {{
                 if (constraints && constraints.video) {{
                     const currentVideo = typeof constraints.video === "object" ? {{ ...constraints.video }} : {{}};
                     if (!currentVideo.facingMode && !currentVideo.deviceId) {{
@@ -348,15 +349,16 @@ with tab_input:
         st.warning("無料枠（3件）に達しました。")
     else:
         apply_camera_facing_preference(st.session_state["camera_facing"])
-        cam_photo = st.camera_input("撮影", key=f"cam_{st.session_state['cam_key']}")
+        cam_photo = st.camera_input("撮影", key="cam_fixed")
         if cam_photo is not None:
-            with st.spinner("解析中..."):
-                try:
-                    register_file(cam_photo)
-                except Exception as exc:
-                    st.session_state["last_status"] = ("error", f"エラー: {exc}")
-            st.session_state["cam_key"] += 1
-            st.rerun()
+            cam_digest = hashlib.sha256(cam_photo.getvalue()).hexdigest()
+            if cam_digest != st.session_state["last_cam_digest"]:
+                st.session_state["last_cam_digest"] = cam_digest
+                with st.spinner("解析中..."):
+                    try:
+                        register_file(cam_photo)
+                    except Exception as exc:
+                        st.session_state["last_status"] = ("error", f"エラー: {exc}")
 
         picked_files = st.file_uploader(
             "画像・PDFを選択",
@@ -431,5 +433,6 @@ with tab_export:
             st.session_state["zip_name"] = ""
             st.session_state["excel_bytes"] = None
             st.session_state["excel_name"] = ""
+            st.session_state["last_cam_digest"] = None
             st.session_state["last_status"] = ("warning", "クリアしました。")
             st.rerun()
