@@ -92,7 +92,6 @@ def init_session():
         "excel_name": "",
         "export_dirty": False,
         "last_cam_digest": None,
-        "up_key": 0,
         "camera_facing": "environment",
         "camera_patch_applied": False,
     }
@@ -102,7 +101,6 @@ def init_session():
 
 
 def save_pro_to_browser(code: str):
-    """再起動後も毎回パスコードを入力不要にするためブラウザ保存"""
     if not code:
         return
     token = pro_token(code)
@@ -129,7 +127,6 @@ def save_pro_to_browser(code: str):
 
 
 def restore_pro_from_browser(valid_code: str):
-    """再起動・再接続時にブラウザ保存済みのPro解除を自動復元"""
     if st.session_state.get("is_pro") or not valid_code:
         return
     expected_token = pro_token(valid_code)
@@ -223,17 +220,21 @@ def apply_camera_facing_preference(facing: str):
 
 
 def optimize_image(file_bytes: bytes, max_px: int = 1200, quality: int = 72) -> bytes:
-    img = Image.open(io.BytesIO(file_bytes))
-    img = ImageOps.exif_transpose(img)
-    if img.mode in ("RGBA", "P", "LA"):
-        img = img.convert("RGB")
-    w, h = img.size
-    if max(w, h) > max_px:
-        scale = max_px / float(max(w, h))
-        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.LANCZOS)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality, optimize=True)
-    return buf.getvalue()
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+        img = ImageOps.exif_transpose(img)
+        if img.mode in ("RGBA", "P", "LA"):
+            img = img.convert("RGB")
+        w, h = img.size
+        if max(w, h) > max_px:
+            scale = max_px / float(max(w, h))
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        return buf.getvalue()
+    except Exception:
+        # PILで開けない形式（未対応HEIC等）は元のバイト列をそのまま返す
+        return file_bytes
 
 
 def build_excel_bytes(records: list) -> bytes:
@@ -343,21 +344,35 @@ def analyze_receipt(data_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
             temperature=0.1,
         ),
     )
-    return json.loads(res.text)
+    raw_text = (res.text or "").strip()
+    if raw_text.startswith("```"):
+        lines = [ln for ln in raw_text.splitlines() if not ln.strip().startswith("```")]
+        raw_text = "\n".join(lines).strip()
+    return json.loads(raw_text)
 
 
 def register_file(uploaded_file):
     raw_bytes = uploaded_file.getvalue()
+    if not raw_bytes:
+        st.session_state["last_status"] = ("error", f"{uploaded_file.name}: 空のファイルです。")
+        return
+
     digest = hashlib.sha256(raw_bytes).hexdigest()
     if digest in st.session_state["processed_hashes"]:
         st.session_state["last_status"] = ("warning", f"「{uploaded_file.name}」は登録済みです。")
         return
 
-    is_pdf = (uploaded_file.type == "application/pdf") or uploaded_file.name.lower().endswith(".pdf")
-    if is_pdf:
+    fname_lower = (uploaded_file.name or "").lower()
+    ftype_lower = (uploaded_file.type or "").lower()
+
+    if ftype_lower == "application/pdf" or fname_lower.endswith(".pdf"):
         payload_bytes = raw_bytes
         mime_type = "application/pdf"
         ext = "pdf"
+    elif fname_lower.endswith(".heic") or "heic" in ftype_lower:
+        payload_bytes = optimize_image(raw_bytes)
+        mime_type = "image/jpeg" if payload_bytes != raw_bytes else "image/heic"
+        ext = "jpg" if mime_type == "image/jpeg" else "heic"
     else:
         payload_bytes = optimize_image(raw_bytes)
         mime_type = "image/jpeg"
@@ -452,10 +467,16 @@ with tab_input:
             "画像・PDFを選択",
             type=["jpg", "jpeg", "png", "webp", "heic", "pdf"],
             accept_multiple_files=True,
-            key=f"up_{st.session_state['up_key']}",
+            key="up_fixed",
         )
         if picked_files:
             for f in picked_files:
+                raw_check = f.getvalue()
+                if not raw_check:
+                    continue
+                f_digest = hashlib.sha256(raw_check).hexdigest()
+                if f_digest in st.session_state["processed_hashes"]:
+                    continue
                 if not st.session_state["is_pro"] and len(st.session_state["records"]) >= FREE_TRIAL_LIMIT:
                     st.session_state["last_status"] = ("warning", "無料枠（3件）に達しました。")
                     break
@@ -464,8 +485,6 @@ with tab_input:
                         register_file(f)
                     except Exception as exc:
                         st.session_state["last_status"] = ("error", f"{f.name}: {exc}")
-            st.session_state["up_key"] += 1
-            st.rerun()
 
     if st.session_state["last_status"]:
         level, text = st.session_state["last_status"]
@@ -531,3 +550,4 @@ with tab_export:
             st.session_state["last_cam_digest"] = None
             st.session_state["last_status"] = ("warning", "クリアしました。")
             st.rerun()
+            
