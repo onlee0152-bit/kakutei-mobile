@@ -75,9 +75,11 @@ def init_session():
         "zip_name": "",
         "excel_bytes": None,
         "excel_name": "",
+        "export_dirty": False,
         "last_cam_digest": None,
         "up_key": 0,
         "camera_facing": "environment",
+        "camera_patch_applied": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -99,11 +101,9 @@ sync_pro_status()
 
 
 def apply_camera_facing_preference(facing: str):
-    """
-    1. 背面カメラ(environment)を優先指定
-    2. 不可時は背面前提を維持
-    3. ユーザーが選んだカメラ(user / environment)を維持
-    """
+    if st.session_state.get("camera_patch_applied"):
+        return
+    st.session_state["camera_patch_applied"] = True
     components.html(
         f"""
         <script>
@@ -188,6 +188,7 @@ def rebuild_export_files():
         st.session_state["excel_name"] = ""
         st.session_state["zip_bytes"] = None
         st.session_state["zip_name"] = ""
+        st.session_state["export_dirty"] = False
         return
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -207,6 +208,8 @@ def rebuild_export_files():
     else:
         st.session_state["zip_bytes"] = None
         st.session_state["zip_name"] = ""
+
+    st.session_state["export_dirty"] = False
 
 
 def analyze_receipt(data_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
@@ -300,7 +303,7 @@ def register_file(uploaded_file):
     if st.session_state["keep_images"]:
         st.session_state["saved_images"][img_filename] = payload_bytes
 
-    rebuild_export_files()
+    st.session_state["export_dirty"] = True
     st.session_state["last_status"] = (
         "success",
         f"登録完了：{row['日付']} / {row['取引先・店名']} / {row['勘定科目']} / ¥{row['税込金額']:,}",
@@ -334,7 +337,7 @@ if keep_images_val != st.session_state["keep_images"]:
     st.session_state["keep_images"] = keep_images_val
     if not keep_images_val:
         st.session_state["saved_images"] = {}
-    rebuild_export_files()
+    st.session_state["export_dirty"] = True
 
 total_records = len(st.session_state["records"])
 warn_threshold = WARN_LIMIT_WITH_IMAGES if st.session_state["keep_images"] else WARN_LIMIT_TEXT_ONLY
@@ -392,6 +395,12 @@ with tab_export:
     if not st.session_state["records"]:
         st.info("データがありません。")
     else:
+        if st.session_state["export_dirty"] or (
+            st.session_state["excel_bytes"] is None
+            and st.session_state["zip_bytes"] is None
+        ):
+            rebuild_export_files()
+
         df_view = pd.DataFrame(st.session_state["records"])
         sum_amount = int(pd.to_numeric(df_view["税込金額"], errors="coerce").fillna(0).sum())
         col1, col2 = st.columns(2)
@@ -433,6 +442,7 @@ with tab_export:
             st.session_state["zip_name"] = ""
             st.session_state["excel_bytes"] = None
             st.session_state["excel_name"] = ""
+            st.session_state["export_dirty"] = False
             st.session_state["last_cam_digest"] = None
             st.session_state["last_status"] = ("warning", "クリアしました。")
             st.rerun()
