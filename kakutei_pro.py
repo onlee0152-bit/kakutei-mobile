@@ -9,9 +9,6 @@ from PIL import Image, ImageOps
 from google import genai
 from google.genai import types
 
-# ==========================================
-# 1. ページ設定・定数
-# ==========================================
 st.set_page_config(
     page_title="撮るだけ確定申告 Pro",
     page_icon="🧾",
@@ -22,12 +19,23 @@ st.set_page_config(
 st.markdown(
     """
     <style>
+    .block-container {
+        padding-top: 0.6rem !important;
+        padding-bottom: 1.5rem !important;
+    }
     [data-testid="stCameraInput"] button {
         font-size: 0 !important;
+        line-height: 0 !important;
+        min-height: 64px !important;
+        padding: 12px 24px !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
     }
     [data-testid="stCameraInput"] button::after {
         content: "⭕️";
-        font-size: 24px !important;
+        font-size: 40px !important;
+        line-height: 1 !important;
     }
     </style>
     """,
@@ -46,9 +54,6 @@ ACCOUNT_CATEGORIES = [
 ]
 
 
-# ==========================================
-# 2. Secrets取得・セッション初期化
-# ==========================================
 def get_secret(key: str, fallback: str = "") -> str:
     val = st.secrets.get(key, "")
     if not val and fallback:
@@ -90,9 +95,6 @@ init_session()
 sync_pro_status()
 
 
-# ==========================================
-# 3. 画像軽量化・Excel / 一括ZIP生成
-# ==========================================
 def optimize_image(file_bytes: bytes, max_px: int = 1200, quality: int = 72) -> bytes:
     img = Image.open(io.BytesIO(file_bytes))
     img = ImageOps.exif_transpose(img)
@@ -164,17 +166,13 @@ def rebuild_export_files():
         st.session_state["zip_name"] = ""
 
 
-# ==========================================
-# 4. Gemini API 解析処理
-# ==========================================
 def analyze_receipt(data_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
     api_key = get_secret("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("Secrets に GEMINI_API_KEY が設定されていません。")
+        raise RuntimeError("GEMINI_API_KEY が未設定です。")
 
     client = genai.Client(api_key=api_key)
     prompt = (
-        "あなたは日本の確定申告・経理実務に精通したAIアシスタントです。"
         "レシート・領収書・請求書から項目を抽出し、JSONのみで返してください。\n"
         "- date: 日付（YYYY-MM-DD形式。不明時は今日の日付）\n"
         "- store: 取引先・店舗名\n"
@@ -222,7 +220,7 @@ def register_file(uploaded_file):
     raw_bytes = uploaded_file.getvalue()
     digest = hashlib.sha256(raw_bytes).hexdigest()
     if digest in st.session_state["processed_hashes"]:
-        st.session_state["last_status"] = ("warning", f"「{uploaded_file.name}」はすでに登録済みです。")
+        st.session_state["last_status"] = ("warning", f"「{uploaded_file.name}」は登録済みです。")
         return
 
     is_pdf = (uploaded_file.type == "application/pdf") or uploaded_file.name.lower().endswith(".pdf")
@@ -266,35 +264,29 @@ def register_file(uploaded_file):
     )
 
 
-# ==========================================
-# 5. 画面描画
-# ==========================================
-st.markdown("### 撮るだけ確定申告 Pro")
+st.markdown("**撮るだけ確定申告 Pro**")
 
 if st.session_state["is_pro"]:
-    st.caption("Pro版（年額 4,980円・税込／年間1,200枚目安）有効中。作業の区切りで一括ダウンロードして保存してください。")
+    st.caption("Pro版有効中")
 else:
     used_count = len(st.session_state["records"])
     rem_count = max(0, FREE_TRIAL_LIMIT - used_count)
-    st.info(f"無料お試し中（残り {rem_count} / {FREE_TRIAL_LIMIT} 件）")
-    with st.expander("Pro版パスコード解除・お申し込み", expanded=(rem_count == 0)):
+    st.caption(f"無料お試し 残り {rem_count}/{FREE_TRIAL_LIMIT} 件")
+    with st.expander("Pro解除 / 申し込み", expanded=(rem_count == 0)):
         stripe_url = get_secret("STRIPE_URL", "STRIPE_PAYMENT_LINK")
         if stripe_url:
-            st.link_button("Pro版（年額 4,980円・税込）を申し込む", stripe_url, use_container_width=True, type="primary")
-        entered_code = st.text_input("解除パスコードを入力", type="password", key="unlock_code_input")
-        if st.button("Pro版を解除する", use_container_width=True):
+            st.link_button("年額 4,980円（税込）を申し込む", stripe_url, use_container_width=True)
+        entered_code = st.text_input("パスコード", type="password", key="unlock_code_input")
+        if st.button("解除", use_container_width=True):
             valid_code = get_secret("PRO_PASSCODE", "ACCESS_CODE")
             if valid_code and entered_code.strip() == valid_code:
                 st.session_state["is_pro"] = True
-                st.session_state["last_status"] = ("success", "Pro版を解除しました。続けてレシートを登録できます。")
+                st.session_state["last_status"] = ("success", "Pro版を解除しました。")
                 st.rerun()
             else:
                 st.error("パスコードが一致しません。")
 
-keep_images_val = st.toggle(
-    "レシート画像もZIPに同梱して保管する（オフ時はExcelのみ）",
-    value=st.session_state["keep_images"],
-)
+keep_images_val = st.toggle("画像もZIPに同梱する", value=st.session_state["keep_images"])
 if keep_images_val != st.session_state["keep_images"]:
     st.session_state["keep_images"] = keep_images_val
     if not keep_images_val:
@@ -304,27 +296,27 @@ if keep_images_val != st.session_state["keep_images"]:
 total_records = len(st.session_state["records"])
 warn_threshold = WARN_LIMIT_WITH_IMAGES if st.session_state["keep_images"] else WARN_LIMIT_TEXT_ONLY
 if total_records >= warn_threshold:
-    st.warning(f"現在 {total_records} 件登録されています。安定動作のため、一度「集計・一括ダウンロード」から保存してください。")
+    st.warning(f"現在 {total_records} 件登録されています。保存してください。")
 
-tab_input, tab_export = st.tabs([f"撮って即登録 ({total_records}件)", "集計・一括ダウンロード"])
+tab_input, tab_export = st.tabs([f"登録 ({total_records})", "出力"])
 
 with tab_input:
     allowed = st.session_state["is_pro"] or (total_records < FREE_TRIAL_LIMIT)
     if not allowed:
-        st.warning("無料お試しの3件に達しました。上の「Pro版パスコード解除・お申し込み」から解除してください。")
+        st.warning("無料枠（3件）に達しました。")
     else:
-        cam_photo = st.camera_input("レシートを撮影", key=f"cam_{st.session_state['cam_key']}")
+        cam_photo = st.camera_input("撮影", key=f"cam_{st.session_state['cam_key']}")
         if cam_photo is not None:
             with st.spinner("解析中..."):
                 try:
                     register_file(cam_photo)
                 except Exception as exc:
-                    st.session_state["last_status"] = ("error", f"読み取りエラー: {exc}")
+                    st.session_state["last_status"] = ("error", f"エラー: {exc}")
             st.session_state["cam_key"] += 1
             st.rerun()
 
         picked_files = st.file_uploader(
-            "または画像・PDFを選択（複数可）",
+            "画像・PDFを選択",
             type=["jpg", "jpeg", "png", "webp", "heic", "pdf"],
             accept_multiple_files=True,
             key=f"up_{st.session_state['up_key']}",
@@ -332,13 +324,13 @@ with tab_input:
         if picked_files:
             for f in picked_files:
                 if not st.session_state["is_pro"] and len(st.session_state["records"]) >= FREE_TRIAL_LIMIT:
-                    st.session_state["last_status"] = ("warning", "無料お試しの3件に達したため残りをスキップしました。")
+                    st.session_state["last_status"] = ("warning", "無料枠（3件）に達しました。")
                     break
                 with st.spinner(f"解析中: {f.name}"):
                     try:
                         register_file(f)
                     except Exception as exc:
-                        st.session_state["last_status"] = ("error", f"{f.name} の読み取りエラー: {exc}")
+                        st.session_state["last_status"] = ("error", f"{f.name}: {exc}")
             st.session_state["up_key"] += 1
             st.rerun()
 
@@ -353,15 +345,14 @@ with tab_input:
 
 with tab_export:
     if not st.session_state["records"]:
-        st.info("まだ登録データがありません。「撮って即登録」タブからレシートを登録してください。")
+        st.info("データがありません。")
     else:
         df_view = pd.DataFrame(st.session_state["records"])
         sum_amount = int(pd.to_numeric(df_view["税込金額"], errors="coerce").fillna(0).sum())
         col1, col2 = st.columns(2)
-        col1.metric("登録件数", f"{len(df_view)} 件")
-        col2.metric("税込合計金額", f"¥{sum_amount:,}")
+        col1.metric("件数", f"{len(df_view)}")
+        col2.metric("合計", f"¥{sum_amount:,}")
 
-        st.subheader("登録明細（直接編集可能）")
         edited = st.data_editor(
             df_view,
             num_rows="dynamic",
@@ -372,29 +363,24 @@ with tab_export:
             st.session_state["records"] = edited.to_dict(orient="records")
             rebuild_export_files()
 
-        st.divider()
-        st.subheader("一括ダウンロード")
         if st.session_state["keep_images"] and st.session_state["zip_bytes"]:
             st.download_button(
-                label="Excel＋画像を1つのZIPで一括ダウンロード",
+                label="ZIP一括ダウンロード",
                 data=st.session_state["zip_bytes"],
                 file_name=st.session_state["zip_name"],
                 mime="application/zip",
-                type="primary",
                 use_container_width=True,
             )
         elif st.session_state["excel_bytes"]:
             st.download_button(
-                label="確定申告用Excelをダウンロード (.xlsx)",
+                label="Excelダウンロード (.xlsx)",
                 data=st.session_state["excel_bytes"],
                 file_name=st.session_state["excel_name"],
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
                 use_container_width=True,
             )
 
-        st.divider()
-        if st.button("保存完了後にデータをクリア", use_container_width=True):
+        if st.button("データクリア", use_container_width=True):
             st.session_state["records"] = []
             st.session_state["saved_images"] = {}
             st.session_state["processed_hashes"] = set()
@@ -402,5 +388,5 @@ with tab_export:
             st.session_state["zip_name"] = ""
             st.session_state["excel_bytes"] = None
             st.session_state["excel_name"] = ""
-            st.session_state["last_status"] = ("warning", "データをクリアしました。")
+            st.session_state["last_status"] = ("warning", "クリアしました。")
             st.rerun()
