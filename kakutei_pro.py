@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import io
 import zipfile
@@ -76,6 +77,7 @@ def init_session():
         "excel_name": "",
         "cam_key": 0,
         "up_key": 0,
+        "camera_facing": "environment",  # 1.背面優先 -> 2.背面初期 -> 3.ユーザー選択維持
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -94,6 +96,45 @@ def sync_pro_status():
 
 init_session()
 sync_pro_status()
+
+
+def apply_camera_facing_preference(facing: str):
+    """
+    1. 背面カメラ(environment)を優先要求
+    2. 不可時は背面前提を維持
+    3. ユーザーが選んだカメラ(user / environment)を維持
+    """
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const preferredFacing = "{facing}";
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+            const origGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+            if (navigator.mediaDevices._kakuteiPatched) return;
+            navigator.mediaDevices._kakuteiPatched = true;
+            navigator.mediaDevices.getUserMedia = function(constraints) {{
+                if (constraints && constraints.video) {{
+                    const currentVideo = typeof constraints.video === "object" ? {{ ...constraints.video }} : {{}};
+                    if (!currentVideo.facingMode && !currentVideo.deviceId) {{
+                        currentVideo.facingMode = {{ ideal: preferredFacing }};
+                    }}
+                    constraints = {{ ...constraints, video: currentVideo }};
+                }}
+                return origGetUserMedia(constraints).catch(function(err) {{
+                    if (constraints && constraints.video && constraints.video.facingMode) {{
+                        const fallbackVideo = typeof constraints.video === "object" ? {{ ...constraints.video }} : {{}};
+                        delete fallbackVideo.facingMode;
+                        return origGetUserMedia({{ ...constraints, video: fallbackVideo }});
+                    }}
+                    throw err;
+                }});
+            }};
+        }})();
+        </script>
+        """,
+        height=0,
+    )
 
 
 def optimize_image(file_bytes: bytes, max_px: int = 1200, quality: int = 72) -> bytes:
@@ -306,6 +347,7 @@ with tab_input:
     if not allowed:
         st.warning("無料枠（3件）に達しました。")
     else:
+        apply_camera_facing_preference(st.session_state["camera_facing"])
         cam_photo = st.camera_input("撮影", key=f"cam_{st.session_state['cam_key']}")
         if cam_photo is not None:
             with st.spinner("解析中..."):
