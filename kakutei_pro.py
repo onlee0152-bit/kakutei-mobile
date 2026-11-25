@@ -74,6 +74,10 @@ def get_secret(key: str, fallback: str = "") -> str:
     return str(val).strip()
 
 
+def pro_token(code: str) -> str:
+    return hashlib.sha256(f"kakutei_pro_v1:{code}".encode("utf-8")).hexdigest()
+
+
 def init_session():
     defaults = {
         "is_pro": False,
@@ -97,13 +101,61 @@ def init_session():
             st.session_state[k] = v
 
 
-def persist_pro_code(code: str):
+def save_pro_to_browser(code: str):
+    """再起動後も毎回パスコードを入力不要にするためブラウザ保存"""
     if not code:
         return
+    token = pro_token(code)
     try:
-        st.query_params["code"] = code
+        st.query_params["pro"] = token
     except Exception:
         pass
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const token = "{token}";
+            try {{
+                localStorage.setItem("kakutei_pro_token", token);
+                if (window.parent && window.parent.localStorage) {{
+                    window.parent.localStorage.setItem("kakutei_pro_token", token);
+                }}
+            }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def restore_pro_from_browser(valid_code: str):
+    """再起動・再接続時にブラウザ保存済みのPro解除を自動復元"""
+    if st.session_state.get("is_pro") or not valid_code:
+        return
+    expected_token = pro_token(valid_code)
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const expected = "{expected_token}";
+            try {{
+                const saved = localStorage.getItem("kakutei_pro_token") ||
+                    (window.parent && window.parent.localStorage ? window.parent.localStorage.getItem("kakutei_pro_token") : "");
+                if (saved === expected) {{
+                    const parentWin = window.parent || window;
+                    const url = new URL(parentWin.location.href);
+                    if (url.searchParams.get("pro") !== expected) {{
+                        url.searchParams.set("pro", expected);
+                        parentWin.history.replaceState(null, "", url.toString());
+                        parentWin.location.reload();
+                    }}
+                }}
+            }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
 
 
 def sync_pro_status():
@@ -111,9 +163,16 @@ def sync_pro_status():
     if not valid_code:
         st.session_state["is_pro"] = True
         return
+
+    expected_token = pro_token(valid_code)
+    query_pro = str(st.query_params.get("pro", "")).strip()
     query_code = str(st.query_params.get("code", "")).strip()
-    if query_code and query_code == valid_code:
+
+    if query_pro == expected_token or (query_code and query_code == valid_code):
         st.session_state["is_pro"] = True
+        save_pro_to_browser(valid_code)
+    elif not st.session_state.get("is_pro"):
+        restore_pro_from_browser(valid_code)
 
 
 init_session()
@@ -352,7 +411,7 @@ else:
             valid_code = get_secret("PRO_PASSCODE", "ACCESS_CODE")
             if valid_code and entered_code.strip() == valid_code:
                 st.session_state["is_pro"] = True
-                persist_pro_code(valid_code)
+                save_pro_to_browser(valid_code)
                 st.session_state["last_status"] = ("success", "Pro版を解除しました。")
                 st.rerun()
             else:
