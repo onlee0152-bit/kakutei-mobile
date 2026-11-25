@@ -265,7 +265,7 @@ def register_file(uploaded_file):
     )
 
 
-st.markdown("**撮るだけ確定申告 Pro**")
+st.markdown("### 撮るだけ確定申告 Pro")
 
 if st.session_state["is_pro"]:
     st.caption("Pro版有効中")
