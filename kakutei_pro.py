@@ -19,6 +19,21 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+st.markdown(
+    """
+    <style>
+    [data-testid="stCameraInput"] button {
+        font-size: 0 !important;
+    }
+    [data-testid="stCameraInput"] button::after {
+        content: "⭕️";
+        font-size: 24px !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 PRIMARY_MODEL = "gemini-3.1-flash-lite"
 FREE_TRIAL_LIMIT = 3
 WARN_LIMIT_TEXT_ONLY = 300
@@ -45,10 +60,10 @@ def init_session():
     defaults = {
         "is_pro": False,
         "records": [],
-        "saved_images": {},       # {filename: jpeg_bytes}
+        "saved_images": {},
         "keep_images": False,
         "processed_hashes": set(),
-        "last_status": None,      # ("success" | "warning" | "error", message)
+        "last_status": None,
         "zip_bytes": None,
         "zip_name": "",
         "excel_bytes": None,
@@ -136,7 +151,6 @@ def rebuild_export_files():
     st.session_state["excel_bytes"] = excel_bytes
     st.session_state["excel_name"] = excel_name
 
-    # 画像同梱オン時は Excel + 軽量化画像を1つのZIPにまとめる（高速ZIP_STOREDで待ち時間短縮）
     if st.session_state["keep_images"] and st.session_state["saved_images"]:
         zbuf = io.BytesIO()
         with zipfile.ZipFile(zbuf, "w", compression=zipfile.ZIP_STORED) as zf:
@@ -255,7 +269,7 @@ def register_file(uploaded_file):
 # ==========================================
 # 5. 画面描画
 # ==========================================
-st.title("撮るだけ確定申告 Pro")
+st.markdown("### 撮るだけ確定申告 Pro")
 
 if st.session_state["is_pro"]:
     st.caption("Pro版（年額 4,980円・税込／年間1,200枚目安）有効中。作業の区切りで一括ダウンロードして保存してください。")
