@@ -30,6 +30,17 @@ st.markdown(
         padding-top: 1.2rem !important;
         padding-bottom: 1.5rem !important;
     }
+    /* タイトル以外（本文・ラベル・ボタン・キャプション・タブ）を少し大きくして読みやすくする */
+    .stMarkdown p,
+    .stCaption,
+    .stAlert,
+    label,
+    .stButton > button,
+    .stLinkButton > a,
+    .stDownloadButton > button,
+    [data-baseweb="tab"] {
+        font-size: 1.05rem !important;
+    }
     [data-testid="stCameraInput"] > div > button {
         font-size: 0 !important;
         line-height: 0 !important;
@@ -86,6 +97,56 @@ def init_session():
             st.session_state[k] = v
 
 
+def persist_pro_code(code: str):
+    """ダウンロード等から戻った際もPro解除を維持できるようURLクエリとlocalStorageに保持"""
+    if not code:
+        return
+    try:
+        st.query_params["code"] = code
+    except Exception:
+        pass
+    components.html(
+        f"""
+        <script>
+        try {{
+            localStorage.setItem("kakutei_pro_code", "{code}");
+            if (window.parent && window.parent.localStorage) {{
+                window.parent.localStorage.setItem("kakutei_pro_code", "{code}");
+            }}
+        }} catch (e) {{}}
+        </script>
+        """,
+        height=0,
+    )
+
+
+def restore_pro_from_storage_if_needed(valid_code: str):
+    """再接続時にクエリが空でもlocalStorageのパスコードからPro状態を復元"""
+    if st.session_state.get("is_pro") or not valid_code:
+        return
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            try {{
+                const saved = localStorage.getItem("kakutei_pro_code") ||
+                    (window.parent && window.parent.localStorage ? window.parent.localStorage.getItem("kakutei_pro_code") : "");
+                if (saved === "{valid_code}") {{
+                    const url = new URL(window.parent.location.href);
+                    if (url.searchParams.get("code") !== saved) {{
+                        url.searchParams.set("code", saved);
+                        window.parent.history.replaceState(null, "", url.toString());
+                        window.parent.location.reload();
+                    }}
+                }}
+            }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def sync_pro_status():
     valid_code = get_secret("PRO_PASSCODE", "ACCESS_CODE")
     if not valid_code:
@@ -94,6 +155,8 @@ def sync_pro_status():
     query_code = str(st.query_params.get("code", "")).strip()
     if query_code and query_code == valid_code:
         st.session_state["is_pro"] = True
+    elif not st.session_state.get("is_pro"):
+        restore_pro_from_storage_if_needed(valid_code)
 
 
 init_session()
@@ -109,28 +172,33 @@ def apply_camera_facing_preference(facing: str):
         <script>
         (function() {{
             const preferredFacing = "{facing}";
-            const mediaDevices = (navigator.mediaDevices) || (window.parent && window.parent.navigator && window.parent.navigator.mediaDevices);
-            if (!mediaDevices || !mediaDevices.getUserMedia) return;
-            const origGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
-            if (mediaDevices._kakuteiPatched) return;
-            mediaDevices._kakuteiPatched = true;
-            mediaDevices.getUserMedia = function(constraints) {{
-                if (constraints && constraints.video) {{
-                    const currentVideo = typeof constraints.video === "object" ? {{ ...constraints.video }} : {{}};
-                    if (!currentVideo.facingMode && !currentVideo.deviceId) {{
-                        currentVideo.facingMode = {{ ideal: preferredFacing }};
+            const targets = [navigator.mediaDevices];
+            if (window.parent && window.parent.navigator && window.parent.navigator.mediaDevices) {{
+                targets.push(window.parent.navigator.mediaDevices);
+            }}
+            targets.forEach(function(mediaDevices) {{
+                if (!mediaDevices || !mediaDevices.getUserMedia || mediaDevices._kakuteiPatched) return;
+                mediaDevices._kakuteiPatched = true;
+                const origGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+                mediaDevices.getUserMedia = function(constraints) {{
+                    let nextConstraints = constraints;
+                    if (constraints && constraints.video) {{
+                        const v = typeof constraints.video === "object" ? {{ ...constraints.video }} : {{}};
+                        if (!v.facingMode && !v.deviceId) {{
+                            v.facingMode = {{ ideal: preferredFacing }};
+                        }}
+                        nextConstraints = {{ ...constraints, video: v }};
                     }}
-                    constraints = {{ ...constraints, video: currentVideo }};
-                }}
-                return origGetUserMedia(constraints).catch(function(err) {{
-                    if (constraints && constraints.video && constraints.video.facingMode) {{
-                        const fallbackVideo = typeof constraints.video === "object" ? {{ ...constraints.video }} : {{}};
-                        delete fallbackVideo.facingMode;
-                        return origGetUserMedia({{ ...constraints, video: fallbackVideo }});
-                    }}
-                    throw err;
-                }});
-            }};
+                    return origGetUserMedia(nextConstraints).catch(function(err) {{
+                        if (nextConstraints && nextConstraints.video && nextConstraints.video.facingMode) {{
+                            const fb = typeof nextConstraints.video === "object" ? {{ ...nextConstraints.video }} : {{}};
+                            delete fb.facingMode;
+                            return origGetUserMedia({{ ...nextConstraints, video: fb }});
+                        }}
+                        throw err;
+                    }});
+                }};
+            }});
         }})();
         </script>
         """,
@@ -327,6 +395,7 @@ else:
             valid_code = get_secret("PRO_PASSCODE", "ACCESS_CODE")
             if valid_code and entered_code.strip() == valid_code:
                 st.session_state["is_pro"] = True
+                persist_pro_code(valid_code)
                 st.session_state["last_status"] = ("success", "Pro版を解除しました。")
                 st.rerun()
             else:
