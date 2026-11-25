@@ -98,53 +98,12 @@ def init_session():
 
 
 def persist_pro_code(code: str):
-    """ダウンロード等から戻った際もPro解除を維持できるようURLクエリとlocalStorageに保持"""
     if not code:
         return
     try:
         st.query_params["code"] = code
     except Exception:
         pass
-    components.html(
-        f"""
-        <script>
-        try {{
-            localStorage.setItem("kakutei_pro_code", "{code}");
-            if (window.parent && window.parent.localStorage) {{
-                window.parent.localStorage.setItem("kakutei_pro_code", "{code}");
-            }}
-        }} catch (e) {{}}
-        </script>
-        """,
-        height=0,
-    )
-
-
-def restore_pro_from_storage_if_needed(valid_code: str):
-    """再接続時にクエリが空でもlocalStorageのパスコードからPro状態を復元"""
-    if st.session_state.get("is_pro") or not valid_code:
-        return
-    components.html(
-        f"""
-        <script>
-        (function() {{
-            try {{
-                const saved = localStorage.getItem("kakutei_pro_code") ||
-                    (window.parent && window.parent.localStorage ? window.parent.localStorage.getItem("kakutei_pro_code") : "");
-                if (saved === "{valid_code}") {{
-                    const url = new URL(window.parent.location.href);
-                    if (url.searchParams.get("code") !== saved) {{
-                        url.searchParams.set("code", saved);
-                        window.parent.history.replaceState(null, "", url.toString());
-                        window.parent.location.reload();
-                    }}
-                }}
-            }} catch (e) {{}}
-        }})();
-        </script>
-        """,
-        height=0,
-    )
 
 
 def sync_pro_status():
@@ -155,8 +114,6 @@ def sync_pro_status():
     query_code = str(st.query_params.get("code", "")).strip()
     if query_code and query_code == valid_code:
         st.session_state["is_pro"] = True
-    elif not st.session_state.get("is_pro"):
-        restore_pro_from_storage_if_needed(valid_code)
 
 
 init_session()
