@@ -41,6 +41,26 @@ st.markdown(
     [data-baseweb="tab"] {
         font-size: 1.05rem !important;
     }
+    /* 「撮影」側のボタン文字を日本語化 */
+    [data-testid="stFileUploader"] button[data-pro-btn="camera"] {
+        font-size: 0 !important;
+        line-height: 0 !important;
+    }
+    [data-testid="stFileUploader"] button[data-pro-btn="camera"]::after {
+        content: "カメラ起動";
+        font-size: 0.95rem !important;
+        line-height: 1.4 !important;
+    }
+    /* 「画像・PDFを選ぶ」側のボタン文字を日本語化 */
+    [data-testid="stFileUploader"] button[data-pro-btn="upload"] {
+        font-size: 0 !important;
+        line-height: 0 !important;
+    }
+    [data-testid="stFileUploader"] button[data-pro-btn="upload"]::after {
+        content: "ファイル選択";
+        font-size: 0.95rem !important;
+        line-height: 1.4 !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -101,19 +121,30 @@ def apply_camera_capture_preference():
                 uploaders.forEach(function(box) {
                     const txt = box.innerText || "";
                     const inp = box.querySelector('input[type="file"]');
-                    if (!inp) return;
+                    const btn = box.querySelector('button');
                     if (txt.includes("撮影")) {
-                        inp.setAttribute("accept", "image/*");
-                        inp.setAttribute("capture", "environment");
+                        if (inp) {
+                            inp.setAttribute("accept", "image/*");
+                            inp.setAttribute("capture", "environment");
+                        }
+                        if (btn) {
+                            btn.setAttribute("data-pro-btn", "camera");
+                        }
                     } else if (txt.includes("画像・PDFを選ぶ")) {
-                        inp.removeAttribute("capture");
-                        inp.setAttribute("accept", "image/*,application/pdf,.heic");
+                        if (inp) {
+                            inp.removeAttribute("capture");
+                            inp.setAttribute("accept", "image/*,application/pdf,.heic");
+                        }
+                        if (btn) {
+                            btn.setAttribute("data-pro-btn", "upload");
+                        }
                     }
                 });
             }
             bindCaptureInputs();
-            setTimeout(bindCaptureInputs, 250);
-            setTimeout(bindCaptureInputs, 800);
+            setTimeout(bindCaptureInputs, 200);
+            setTimeout(bindCaptureInputs, 600);
+            setTimeout(bindCaptureInputs, 1200);
         })();
         </script>
         """,
