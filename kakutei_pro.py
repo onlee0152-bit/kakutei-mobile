@@ -97,6 +97,21 @@ def get_secret(key: str, fallback: str = "") -> str:
     return str(val).strip()
 
 
+def get_valid_passcodes() -> list[str]:
+    raw_items = []
+    for k in ("PRO_PASSCODES", "PRO_PASSCODE", "ACCESS_CODE"):
+        v = str(st.secrets.get(k, "")).strip()
+        if v:
+            raw_items.append(v)
+    codes = []
+    for chunk in raw_items:
+        for part in chunk.replace("\n", ",").split(","):
+            c = part.strip()
+            if c and c not in codes:
+                codes.append(c)
+    return codes
+
+
 def pro_token(code: str) -> str:
     return hashlib.sha256(f"kakutei_pro_v1:{code}".encode("utf-8")).hexdigest()
 
@@ -200,25 +215,62 @@ def save_pro_to_browser(code: str):
     )
 
 
-def restore_pro_from_browser(valid_code: str):
-    if st.session_state.get("is_pro") or not valid_code:
+def clear_pro_from_browser():
+    try:
+        if "pro" in st.query_params:
+            del st.query_params["pro"]
+        if "code" in st.query_params:
+            del st.query_params["code"]
+    except Exception:
+        pass
+    components.html(
+        """
+        <script>
+        (function() {
+            try {
+                localStorage.removeItem("kakutei_pro_token");
+                if (window.parent && window.parent.localStorage) {
+                    window.parent.localStorage.removeItem("kakutei_pro_token");
+                }
+                const parentWin = window.parent || window;
+                const url = new URL(parentWin.location.href);
+                if (url.searchParams.has("pro") || url.searchParams.has("code")) {
+                    url.searchParams.delete("pro");
+                    url.searchParams.delete("code");
+                    parentWin.history.replaceState(null, "", url.toString());
+                }
+            } catch (e) {}
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def restore_pro_from_browser(valid_tokens: list[str]):
+    if st.session_state.get("is_pro") or not valid_tokens:
         return
-    expected_token = pro_token(valid_code)
+    tokens_json = json.dumps(valid_tokens)
     components.html(
         f"""
         <script>
         (function() {{
-            const expected = "{expected_token}";
+            const validTokens = {tokens_json};
             try {{
                 const saved = localStorage.getItem("kakutei_pro_token") ||
                     (window.parent && window.parent.localStorage ? window.parent.localStorage.getItem("kakutei_pro_token") : "");
-                if (saved === expected) {{
+                if (saved && validTokens.includes(saved)) {{
                     const parentWin = window.parent || window;
                     const url = new URL(parentWin.location.href);
-                    if (url.searchParams.get("pro") !== expected) {{
-                        url.searchParams.set("pro", expected);
+                    if (url.searchParams.get("pro") !== saved) {{
+                        url.searchParams.set("pro", saved);
                         parentWin.history.replaceState(null, "", url.toString());
                         parentWin.location.reload();
+                    }}
+                }} else if (saved && !validTokens.includes(saved)) {{
+                    localStorage.removeItem("kakutei_pro_token");
+                    if (window.parent && window.parent.localStorage) {{
+                        window.parent.localStorage.removeItem("kakutei_pro_token");
                     }}
                 }}
             }} catch (e) {{}}
@@ -230,20 +282,33 @@ def restore_pro_from_browser(valid_code: str):
 
 
 def sync_pro_status():
-    valid_code = get_secret("PRO_PASSCODE", "ACCESS_CODE")
-    if not valid_code:
+    valid_codes = get_valid_passcodes()
+    if not valid_codes:
         st.session_state["is_pro"] = True
         return
 
-    expected_token = pro_token(valid_code)
+    token_to_code = {pro_token(c): c for c in valid_codes}
+    valid_tokens = list(token_to_code.keys())
+
     query_pro = str(st.query_params.get("pro", "")).strip()
     query_code = str(st.query_params.get("code", "")).strip()
 
-    if query_pro == expected_token or (query_code and query_code == valid_code):
-        st.session_state["is_pro"] = True
-        save_pro_to_browser(valid_code)
+    if query_pro:
+        if query_pro in token_to_code:
+            st.session_state["is_pro"] = True
+            save_pro_to_browser(token_to_code[query_pro])
+        else:
+            st.session_state["is_pro"] = False
+            clear_pro_from_browser()
+    elif query_code:
+        if query_code in valid_codes:
+            st.session_state["is_pro"] = True
+            save_pro_to_browser(query_code)
+        else:
+            st.session_state["is_pro"] = False
+            clear_pro_from_browser()
     elif not st.session_state.get("is_pro"):
-        restore_pro_from_browser(valid_code)
+        restore_pro_from_browser(valid_tokens)
 
 
 init_session()
@@ -443,22 +508,28 @@ st.markdown("### 撮るだけ確定申告 Pro")
 st.caption("レシート入力・仕分けの下書きを最速で終わらせる相棒")
 
 if st.session_state["is_pro"]:
-    st.caption("Pro版有効中")
+    st.caption("Pro版有効中（年額プラン）")
+    portal_url = get_secret("STRIPE_PORTAL_URL")
+    if portal_url:
+        with st.expander("ご契約管理・解約手続き"):
+            st.caption("契約内容の確認・お支払い方法の変更・解約（退会）はこちら")
+            st.link_button("契約管理・解約画面を開く", portal_url, use_container_width=True)
 else:
     used_count = len(st.session_state["records"])
     rem_count = max(0, FREE_TRIAL_LIMIT - used_count)
     st.caption(f"無料お試し 残り {rem_count}/{FREE_TRIAL_LIMIT} 件")
     with st.expander("Pro購入 / パスコード入力", expanded=(rem_count == 0)):
-        st.caption("年額 3,960円（税込／月あたり 330円相当）")
+        st.caption("年額 3,960円（税込／月あたり 330円相当・毎年自動更新）")
         stripe_url = get_secret("STRIPE_URL", "STRIPE_PAYMENT_LINK")
         if stripe_url:
             st.link_button("Pro購入（年額 3,960円・税込）", stripe_url, use_container_width=True)
         entered_code = st.text_input("パスコード", type="password", key="unlock_code_input")
         if st.button("パスコードを有効化", use_container_width=True):
-            valid_code = get_secret("PRO_PASSCODE", "ACCESS_CODE")
-            if valid_code and entered_code.strip() == valid_code:
+            valid_codes = get_valid_passcodes()
+            entered = entered_code.strip()
+            if valid_codes and entered in valid_codes:
                 st.session_state["is_pro"] = True
-                save_pro_to_browser(valid_code)
+                save_pro_to_browser(entered)
                 st.session_state["last_status"] = ("success", "Pro版を有効化しました。")
                 st.rerun()
             else:
