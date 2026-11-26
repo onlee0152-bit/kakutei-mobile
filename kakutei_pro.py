@@ -259,4 +259,283 @@ def rebuild_export_files():
     if st.session_state["keep_images"] and st.session_state["saved_images"]:
         zbuf = io.BytesIO()
         with zipfile.ZipFile(zbuf, "w", compression=zipfile.ZIP_STORED) as zf:
-            zf.writestr(excel_name
+            zf.writestr(excel_name, excel_bytes)
+            for fname, img_bytes in st.session_state["saved_images"].items():
+                zf.writestr(f"receipts/{fname}", img_bytes)
+        st.session_state["zip_bytes"] = zbuf.getvalue()
+        st.session_state["zip_name"] = f"kakutei_set_{stamp}.zip"
+    else:
+        st.session_state["zip_bytes"] = None
+        st.session_state["zip_name"] = ""
+
+    st.session_state["export_dirty"] = False
+
+
+def analyze_receipt(data_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
+    api_key = get_secret("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY が未設定です。")
+
+    client = genai.Client(api_key=api_key)
+    prompt = (
+        "レシート・領収書・請求書から項目を抽出し、JSONのみで返してください。\n"
+        "- date: 日付（YYYY-MM-DD形式。不明時は今日の日付）\n"
+        "- store: 取引先・店舗名\n"
+        f"- category: 勘定科目（次から1つ選択: {', '.join(ACCOUNT_CATEGORIES)}）\n"
+        "- amount: 税込合計金額（整数）\n"
+        "- tax_rate: 主な消費税率（10 または 8 または 0）\n"
+        "- tax_amount: 消費税額（整数。記載なければ税込金額から逆算）\n"
+        "- invoice_no: インボイス登録番号（Tから始まる13桁。なければ空文字）\n"
+        "- payment_method: 支払方法（現金 / クレジットカード / 電子マネー・QR / 振込 / 不明）\n"
+        "- summary: 主な品目・用途の簡潔な説明"
+    )
+
+    schema = {
+        "type": "OBJECT",
+        "properties": {
+            "date": {"type": "STRING"},
+            "store": {"type": "STRING"},
+            "category": {"type": "STRING"},
+            "amount": {"type": "INTEGER"},
+            "tax_rate": {"type": "INTEGER"},
+            "tax_amount": {"type": "INTEGER"},
+            "invoice_no": {"type": "STRING"},
+            "payment_method": {"type": "STRING"},
+            "summary": {"type": "STRING"},
+        },
+        "required": [
+            "date", "store", "category", "amount", "tax_rate",
+            "tax_amount", "invoice_no", "payment_method", "summary",
+        ],
+    }
+
+    res = client.models.generate_content(
+        model=PRIMARY_MODEL,
+        contents=[types.Part.from_bytes(data=data_bytes, mime_type=mime_type), prompt],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=schema,
+            temperature=0.1,
+        ),
+    )
+    raw_text = (res.text or "").strip()
+    if raw_text.startswith("```"):
+        lines = [ln for ln in raw_text.splitlines() if not ln.strip().startswith("```")]
+        raw_text = "\n".join(lines).strip()
+    return json.loads(raw_text)
+
+
+def register_file(uploaded_file):
+    raw_bytes = uploaded_file.getvalue()
+    if not raw_bytes:
+        st.session_state["last_status"] = ("error", f"{uploaded_file.name}: 空のファイルです。")
+        return
+
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    if digest in st.session_state["processed_hashes"]:
+        st.session_state["last_status"] = ("warning", f"「{uploaded_file.name}」は登録済みです。")
+        return
+
+    fname_lower = (uploaded_file.name or "").lower()
+    ftype_lower = (uploaded_file.type or "").lower()
+
+    if ftype_lower == "application/pdf" or fname_lower.endswith(".pdf"):
+        payload_bytes = raw_bytes
+        mime_type = "application/pdf"
+        ext = "pdf"
+    elif fname_lower.endswith(".heic") or "heic" in ftype_lower:
+        payload_bytes = optimize_image(raw_bytes)
+        mime_type = "image/jpeg" if payload_bytes != raw_bytes else "image/heic"
+        ext = "jpg" if mime_type == "image/jpeg" else "heic"
+    else:
+        payload_bytes = optimize_image(raw_bytes)
+        mime_type = "image/jpeg"
+        ext = "jpg"
+
+    parsed = analyze_receipt(payload_bytes, mime_type=mime_type)
+
+    seq = len(st.session_state["records"]) + 1
+    date_str = str(parsed.get("date") or datetime.now().strftime("%Y-%m-%d")).replace("-", "")
+    img_filename = f"{date_str}_{seq:03d}.{ext}" if st.session_state["keep_images"] else ""
+
+    row = {
+        "日付": str(parsed.get("date") or ""),
+        "取引先・店名": str(parsed.get("store") or ""),
+        "勘定科目": str(parsed.get("category") or "雑費"),
+        "税込金額": int(parsed.get("amount") or 0),
+        "税率(%)": int(parsed.get("tax_rate") or 10),
+        "消費税額": int(parsed.get("tax_amount") or 0),
+        "インボイス番号": str(parsed.get("invoice_no") or ""),
+        "支払方法": str(parsed.get("payment_method") or ""),
+        "摘要・品目": str(parsed.get("summary") or ""),
+        "画像ファイル名": img_filename,
+    }
+
+    st.session_state["records"].append(row)
+    st.session_state["processed_hashes"].add(digest)
+    if st.session_state["keep_images"]:
+        st.session_state["saved_images"][img_filename] = payload_bytes
+
+    st.session_state["export_dirty"] = True
+    st.session_state["last_status"] = (
+        "success",
+        f"登録完了：{row['日付']} / {row['取引先・店名']} / {row['勘定科目']} / ¥{row['税込金額']:,}",
+    )
+
+
+st.markdown("### 撮るだけ確定申告 Pro")
+st.caption("レシート入力・仕分けの下書きを最速で終わらせる相棒")
+
+if st.session_state["is_pro"]:
+    st.caption("Pro版有効中")
+else:
+    used_count = len(st.session_state["records"])
+    rem_count = max(0, FREE_TRIAL_LIMIT - used_count)
+    st.caption(f"無料お試し 残り {rem_count}/{FREE_TRIAL_LIMIT} 件")
+    with st.expander("Pro購入 / パスコード入力", expanded=(rem_count == 0)):
+        st.caption("年額 3,960円（税込／月あたり 330円相当）")
+        stripe_url = get_secret("STRIPE_URL", "STRIPE_PAYMENT_LINK")
+        if stripe_url:
+            st.link_button("Pro購入（年額 3,960円・税込）", stripe_url, use_container_width=True)
+        entered_code = st.text_input("パスコード", type="password", key="unlock_code_input")
+        if st.button("パスコードを有効化", use_container_width=True):
+            valid_code = get_secret("PRO_PASSCODE", "ACCESS_CODE")
+            if valid_code and entered_code.strip() == valid_code:
+                st.session_state["is_pro"] = True
+                save_pro_to_browser(valid_code)
+                st.session_state["last_status"] = ("success", "Pro版を有効化しました。")
+                st.rerun()
+            else:
+                st.error("パスコードが一致しません。")
+
+keep_images_val = st.toggle("画像もZIPに同梱する", value=st.session_state["keep_images"])
+if keep_images_val != st.session_state["keep_images"]:
+    st.session_state["keep_images"] = keep_images_val
+    if not keep_images_val:
+        st.session_state["saved_images"] = {}
+    st.session_state["export_dirty"] = True
+
+total_records = len(st.session_state["records"])
+warn_threshold = WARN_LIMIT_WITH_IMAGES if st.session_state["keep_images"] else WARN_LIMIT_TEXT_ONLY
+if total_records >= warn_threshold:
+    st.warning(f"現在 {total_records} 件登録されています。保存してください。")
+
+tab_input, tab_export = st.tabs([f"登録 ({total_records})", "出力"])
+
+with tab_input:
+    allowed = st.session_state["is_pro"] or (total_records < FREE_TRIAL_LIMIT)
+    if not allowed:
+        st.warning(f"無料お試し枠（{FREE_TRIAL_LIMIT}件）に達しました。続けて利用するにはPro購入をご検討ください。")
+    else:
+        apply_camera_capture_preference()
+
+        cam_files = st.file_uploader(
+            "写真を撮る",
+            type=["jpg", "jpeg", "png", "webp", "heic"],
+            accept_multiple_files=False,
+            key=f"cam_up_{st.session_state['cam_key']}",
+        )
+        if cam_files is not None:
+            raw_check = cam_files.getvalue()
+            if raw_check:
+                f_digest = hashlib.sha256(raw_check).hexdigest()
+                if f_digest not in st.session_state["processed_hashes"]:
+                    with st.spinner(f"解析中: {cam_files.name}"):
+                        try:
+                            register_file(cam_files)
+                        except Exception as exc:
+                            st.session_state["last_status"] = ("error", f"{cam_files.name}: {exc}")
+            st.session_state["cam_key"] += 1
+            st.rerun()
+
+        picked_files = st.file_uploader(
+            "写真・PDFを選ぶ",
+            type=["jpg", "jpeg", "png", "webp", "heic", "pdf"],
+            accept_multiple_files=True,
+            key=f"up_{st.session_state['up_key']}",
+        )
+        if picked_files:
+            processed_any = False
+            for f in picked_files:
+                raw_check = f.getvalue()
+                if not raw_check:
+                    continue
+                f_digest = hashlib.sha256(raw_check).hexdigest()
+                if f_digest in st.session_state["processed_hashes"]:
+                    continue
+                if not st.session_state["is_pro"] and len(st.session_state["records"]) >= FREE_TRIAL_LIMIT:
+                    st.session_state["last_status"] = ("warning", f"無料お試し枠（{FREE_TRIAL_LIMIT}件）に達しました。")
+                    break
+                with st.spinner(f"解析中: {f.name}"):
+                    try:
+                        register_file(f)
+                        processed_any = True
+                    except Exception as exc:
+                        st.session_state["last_status"] = ("error", f"{f.name}: {exc}")
+            if processed_any:
+                st.session_state["up_key"] += 1
+                st.rerun()
+
+    if st.session_state["last_status"]:
+        level, text = st.session_state["last_status"]
+        if level == "success":
+            st.success(text)
+        elif level == "warning":
+            st.warning(text)
+        else:
+            st.error(text)
+
+with tab_export:
+    if not st.session_state["records"]:
+        st.info("データがありません。")
+    else:
+        if st.session_state["export_dirty"] or (
+            st.session_state["excel_bytes"] is None
+            and st.session_state["zip_bytes"] is None
+        ):
+            rebuild_export_files()
+
+        df_view = pd.DataFrame(st.session_state["records"])
+        sum_amount = int(pd.to_numeric(df_view["税込金額"], errors="coerce").fillna(0).sum())
+        col1, col2 = st.columns(2)
+        col1.metric("件数", f"{len(df_view)}")
+        col2.metric("合計", f"¥{sum_amount:,}")
+
+        edited = st.data_editor(
+            df_view,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="detail_editor",
+        )
+        if not edited.equals(df_view):
+            st.session_state["records"] = edited.to_dict(orient="records")
+            rebuild_export_files()
+
+        if st.session_state["keep_images"] and st.session_state["zip_bytes"]:
+            st.download_button(
+                label="ZIP一括ダウンロード",
+                data=st.session_state["zip_bytes"],
+                file_name=st.session_state["zip_name"],
+                mime="application/zip",
+                use_container_width=True,
+            )
+        elif st.session_state["excel_bytes"]:
+            st.download_button(
+                label="Excelダウンロード (.xlsx)",
+                data=st.session_state["excel_bytes"],
+                file_name=st.session_state["excel_name"],
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+        if st.button("データクリア", use_container_width=True):
+            st.session_state["records"] = []
+            st.session_state["saved_images"] = {}
+            st.session_state["processed_hashes"] = set()
+            st.session_state["zip_bytes"] = None
+            st.session_state["zip_name"] = ""
+            st.session_state["excel_bytes"] = None
+            st.session_state["excel_name"] = ""
+            st.session_state["export_dirty"] = False
+            st.session_state["last_status"] = ("warning", "クリアしました。")
+            st.rerun()
