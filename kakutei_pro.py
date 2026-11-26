@@ -95,22 +95,25 @@ def apply_camera_capture_preference():
         """
         <script>
         (function() {
-            function tagCameraInputs() {
+            function bindCaptureInputs() {
                 const doc = (window.parent && window.parent.document) || document;
                 const uploaders = doc.querySelectorAll('[data-testid="stFileUploader"]');
                 uploaders.forEach(function(box) {
                     const txt = box.innerText || "";
-                    if (txt.includes("写真を撮る")) {
-                        const inp = box.querySelector('input[type="file"]');
-                        if (inp) {
-                            inp.setAttribute("capture", "environment");
-                        }
+                    const inp = box.querySelector('input[type="file"]');
+                    if (!inp) return;
+                    if (txt.includes("撮影して読み込む")) {
+                        inp.setAttribute("accept", "image/*");
+                        inp.setAttribute("capture", "environment");
+                    } else if (txt.includes("画像・PDFを選ぶ")) {
+                        inp.removeAttribute("capture");
+                        inp.setAttribute("accept", "image/*,application/pdf,.heic");
                     }
                 });
             }
-            tagCameraInputs();
-            setTimeout(tagCameraInputs, 300);
-            setTimeout(tagCameraInputs, 1000);
+            bindCaptureInputs();
+            setTimeout(bindCaptureInputs, 250);
+            setTimeout(bindCaptureInputs, 800);
         })();
         </script>
         """,
@@ -429,27 +432,27 @@ with tab_input:
     else:
         apply_camera_capture_preference()
 
-        cam_files = st.file_uploader(
-            "写真を撮る",
+        cam_file = st.file_uploader(
+            "撮影して読み込む",
             type=["jpg", "jpeg", "png", "webp", "heic"],
             accept_multiple_files=False,
             key=f"cam_up_{st.session_state['cam_key']}",
         )
-        if cam_files is not None:
-            raw_check = cam_files.getvalue()
+        if cam_file is not None:
+            raw_check = cam_file.getvalue()
             if raw_check:
                 f_digest = hashlib.sha256(raw_check).hexdigest()
                 if f_digest not in st.session_state["processed_hashes"]:
-                    with st.spinner(f"解析中: {cam_files.name}"):
+                    with st.spinner(f"解析中: {cam_file.name}"):
                         try:
-                            register_file(cam_files)
+                            register_file(cam_file)
                         except Exception as exc:
-                            st.session_state["last_status"] = ("error", f"{cam_files.name}: {exc}")
+                            st.session_state["last_status"] = ("error", f"{cam_file.name}: {exc}")
             st.session_state["cam_key"] += 1
             st.rerun()
 
         picked_files = st.file_uploader(
-            "写真・PDFを選ぶ",
+            "画像・PDFを選ぶ",
             type=["jpg", "jpeg", "png", "webp", "heic", "pdf"],
             accept_multiple_files=True,
             key=f"up_{st.session_state['up_key']}",
