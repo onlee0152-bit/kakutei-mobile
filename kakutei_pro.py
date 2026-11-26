@@ -41,23 +41,35 @@ st.markdown(
     [data-baseweb="tab"] {
         font-size: 1.05rem !important;
     }
-    /* 「撮影」側のボタン文字を日本語化 */
+    /* 「撮影」ボタンの中身を消して「撮影」だけ表示 */
     [data-testid="stFileUploader"] button[data-pro-btn="camera"] {
         font-size: 0 !important;
         line-height: 0 !important;
     }
+    [data-testid="stFileUploader"] button[data-pro-btn="camera"] > *,
+    [data-testid="stFileUploader"] button[data-pro-btn="camera"] svg,
+    [data-testid="stFileUploader"] button[data-pro-btn="camera"] span {
+        display: none !important;
+    }
     [data-testid="stFileUploader"] button[data-pro-btn="camera"]::after {
-        content: "カメラ起動";
+        content: "撮影";
+        display: inline-block;
         font-size: 0.95rem !important;
         line-height: 1.4 !important;
     }
-    /* 「画像・PDFを選ぶ」側のボタン文字を日本語化 */
+    /* 「画像・PDFを選ぶ」ボタンの中身を消して「ファイル選択」だけ表示 */
     [data-testid="stFileUploader"] button[data-pro-btn="upload"] {
         font-size: 0 !important;
         line-height: 0 !important;
     }
+    [data-testid="stFileUploader"] button[data-pro-btn="upload"] > *,
+    [data-testid="stFileUploader"] button[data-pro-btn="upload"] svg,
+    [data-testid="stFileUploader"] button[data-pro-btn="upload"] span {
+        display: none !important;
+    }
     [data-testid="stFileUploader"] button[data-pro-btn="upload"]::after {
         content: "ファイル選択";
+        display: inline-block;
         font-size: 0.95rem !important;
         line-height: 1.4 !important;
     }
@@ -127,7 +139,7 @@ def apply_camera_capture_preference():
                             inp.setAttribute("accept", "image/*");
                             inp.setAttribute("capture", "environment");
                         }
-                        if (btn) {
+                        if (btn && btn.getAttribute("data-pro-btn") !== "camera") {
                             btn.setAttribute("data-pro-btn", "camera");
                         }
                     } else if (txt.includes("画像・PDFを選ぶ")) {
@@ -135,16 +147,26 @@ def apply_camera_capture_preference():
                             inp.removeAttribute("capture");
                             inp.setAttribute("accept", "image/*,application/pdf,.heic");
                         }
-                        if (btn) {
+                        if (btn && btn.getAttribute("data-pro-btn") !== "upload") {
                             btn.setAttribute("data-pro-btn", "upload");
                         }
                     }
                 });
             }
             bindCaptureInputs();
-            setTimeout(bindCaptureInputs, 200);
-            setTimeout(bindCaptureInputs, 600);
-            setTimeout(bindCaptureInputs, 1200);
+            [100, 300, 700, 1500].forEach(function(ms) {
+                setTimeout(bindCaptureInputs, ms);
+            });
+            try {
+                const doc = (window.parent && window.parent.document) || document;
+                if (doc && doc.body && !doc.body._kakuteiBtnObserver) {
+                    doc.body._kakuteiBtnObserver = true;
+                    const obs = new MutationObserver(function() {
+                        bindCaptureInputs();
+                    });
+                    obs.observe(doc.body, { childList: true, subtree: true });
+                }
+            } catch (e) {}
         })();
         </script>
         """,
