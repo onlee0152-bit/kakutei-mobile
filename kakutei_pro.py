@@ -41,22 +41,13 @@ st.markdown(
     [data-baseweb="tab"] {
         font-size: 1.05rem !important;
     }
-    [data-testid="stCameraInput"] > div > button {
-        font-size: 0 !important;
-        line-height: 0 !important;
-    }
-    [data-testid="stCameraInput"] > div > button::after {
-        content: "⭕️";
-        font-size: 40px !important;
-        line-height: 1 !important;
-    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 PRIMARY_MODEL = "gemini-3.1-flash-lite"
-FREE_TRIAL_LIMIT = 3
+FREE_TRIAL_LIMIT = 10
 WARN_LIMIT_TEXT_ONLY = 300
 WARN_LIMIT_WITH_IMAGES = 150
 
@@ -91,9 +82,6 @@ def init_session():
         "excel_bytes": None,
         "excel_name": "",
         "export_dirty": False,
-        "last_cam_digest": None,
-        "camera_facing": "environment",
-        "camera_patch_applied": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -176,49 +164,6 @@ init_session()
 sync_pro_status()
 
 
-def apply_camera_facing_preference(facing: str):
-    if st.session_state.get("camera_patch_applied"):
-        return
-    st.session_state["camera_patch_applied"] = True
-    components.html(
-        f"""
-        <script>
-        (function() {{
-            const preferredFacing = "{facing}";
-            const targets = [navigator.mediaDevices];
-            if (window.parent && window.parent.navigator && window.parent.navigator.mediaDevices) {{
-                targets.push(window.parent.navigator.mediaDevices);
-            }}
-            targets.forEach(function(mediaDevices) {{
-                if (!mediaDevices || !mediaDevices.getUserMedia || mediaDevices._kakuteiPatched) return;
-                mediaDevices._kakuteiPatched = true;
-                const origGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
-                mediaDevices.getUserMedia = function(constraints) {{
-                    let nextConstraints = constraints;
-                    if (constraints && constraints.video) {{
-                        const v = typeof constraints.video === "object" ? {{ ...constraints.video }} : {{}};
-                        if (!v.facingMode && !v.deviceId) {{
-                            v.facingMode = {{ ideal: preferredFacing }};
-                        }}
-                        nextConstraints = {{ ...constraints, video: v }};
-                    }}
-                    return origGetUserMedia(nextConstraints).catch(function(err) {{
-                        if (nextConstraints && nextConstraints.video && nextConstraints.video.facingMode) {{
-                            const fb = typeof nextConstraints.video === "object" ? {{ ...nextConstraints.video }} : {{}};
-                            delete fb.facingMode;
-                            return origGetUserMedia({{ ...nextConstraints, video: fb }});
-                        }}
-                        throw err;
-                    }});
-                }};
-            }});
-        }})();
-        </script>
-        """,
-        height=0,
-    )
-
-
 def optimize_image(file_bytes: bytes, max_px: int = 1200, quality: int = 72) -> bytes:
     try:
         img = Image.open(io.BytesIO(file_bytes))
@@ -233,7 +178,6 @@ def optimize_image(file_bytes: bytes, max_px: int = 1200, quality: int = 72) -> 
         img.save(buf, format="JPEG", quality=quality, optimize=True)
         return buf.getvalue()
     except Exception:
-        # PILで開けない形式（未対応HEIC等）は元のバイト列をそのまま返す
         return file_bytes
 
 
@@ -410,6 +354,7 @@ def register_file(uploaded_file):
 
 
 st.markdown("### 撮るだけ確定申告 Pro")
+st.caption("レシート入力・仕分けの下書きを最速で終わらせる相棒")
 
 if st.session_state["is_pro"]:
     st.caption("Pro版有効中")
@@ -417,17 +362,18 @@ else:
     used_count = len(st.session_state["records"])
     rem_count = max(0, FREE_TRIAL_LIMIT - used_count)
     st.caption(f"無料お試し 残り {rem_count}/{FREE_TRIAL_LIMIT} 件")
-    with st.expander("Pro解除 / 申し込み", expanded=(rem_count == 0)):
+    with st.expander("Pro購入 / パスコード入力", expanded=(rem_count == 0)):
+        st.caption("年額 3,960円（税込／月あたり 330円相当）")
         stripe_url = get_secret("STRIPE_URL", "STRIPE_PAYMENT_LINK")
         if stripe_url:
-            st.link_button("年額 4,980円（税込）を申し込む", stripe_url, use_container_width=True)
+            st.link_button("Pro購入（年額 3,960円・税込）", stripe_url, use_container_width=True)
         entered_code = st.text_input("パスコード", type="password", key="unlock_code_input")
-        if st.button("解除", use_container_width=True):
+        if st.button("パスコードを有効化", use_container_width=True):
             valid_code = get_secret("PRO_PASSCODE", "ACCESS_CODE")
             if valid_code and entered_code.strip() == valid_code:
                 st.session_state["is_pro"] = True
                 save_pro_to_browser(valid_code)
-                st.session_state["last_status"] = ("success", "Pro版を解除しました。")
+                st.session_state["last_status"] = ("success", "Pro版を有効化しました。")
                 st.rerun()
             else:
                 st.error("パスコードが一致しません。")
@@ -449,22 +395,10 @@ tab_input, tab_export = st.tabs([f"登録 ({total_records})", "出力"])
 with tab_input:
     allowed = st.session_state["is_pro"] or (total_records < FREE_TRIAL_LIMIT)
     if not allowed:
-        st.warning("無料枠（3件）に達しました。")
+        st.warning(f"無料お試し枠（{FREE_TRIAL_LIMIT}件）に達しました。続けて利用するにはPro購入をご検討ください。")
     else:
-        apply_camera_facing_preference(st.session_state["camera_facing"])
-        cam_photo = st.camera_input("撮影", key="cam_fixed")
-        if cam_photo is not None:
-            cam_digest = hashlib.sha256(cam_photo.getvalue()).hexdigest()
-            if cam_digest != st.session_state["last_cam_digest"]:
-                st.session_state["last_cam_digest"] = cam_digest
-                with st.spinner("解析中..."):
-                    try:
-                        register_file(cam_photo)
-                    except Exception as exc:
-                        st.session_state["last_status"] = ("error", f"エラー: {exc}")
-
         picked_files = st.file_uploader(
-            "画像・PDFを選択",
+            "画像・PDFをアップロード（写真選択・撮影ファイル・PDF対応）",
             type=["jpg", "jpeg", "png", "webp", "heic", "pdf"],
             accept_multiple_files=True,
             key="up_fixed",
@@ -478,7 +412,7 @@ with tab_input:
                 if f_digest in st.session_state["processed_hashes"]:
                     continue
                 if not st.session_state["is_pro"] and len(st.session_state["records"]) >= FREE_TRIAL_LIMIT:
-                    st.session_state["last_status"] = ("warning", "無料枠（3件）に達しました。")
+                    st.session_state["last_status"] = ("warning", f"無料お試し枠（{FREE_TRIAL_LIMIT}件）に達しました。")
                     break
                 with st.spinner(f"解析中: {f.name}"):
                     try:
@@ -547,7 +481,5 @@ with tab_export:
             st.session_state["excel_bytes"] = None
             st.session_state["excel_name"] = ""
             st.session_state["export_dirty"] = False
-            st.session_state["last_cam_digest"] = None
             st.session_state["last_status"] = ("warning", "クリアしました。")
             st.rerun()
-            
