@@ -394,4 +394,151 @@ if st.session_state["is_pro"]:
 else:
     used_count = len(st.session_state["records"])
     rem_count = max(0, FREE_TRIAL_LIMIT - used_count)
-    st.
+    st.caption(f"無料お試し 残り {rem_count}/{FREE_TRIAL_LIMIT} 件")
+    with st.expander("Pro購入 / パスコード入力", expanded=(rem_count == 0)):
+        st.caption("年額 3,960円（税込／月あたり 330円相当）")
+        stripe_url = get_secret("STRIPE_URL", "STRIPE_PAYMENT_LINK")
+        if stripe_url:
+            st.link_button("Pro購入（年額 3,960円・税込）", stripe_url, use_container_width=True)
+        entered_code = st.text_input("パスコード", type="password", key="unlock_code_input")
+        if st.button("パスコードを有効化", use_container_width=True):
+            valid_code = get_secret("PRO_PASSCODE", "ACCESS_CODE")
+            if valid_code and entered_code.strip() == valid_code:
+                st.session_state["is_pro"] = True
+                save_pro_to_browser(valid_code)
+                st.session_state["last_status"] = ("success", "Pro版を有効化しました。")
+                st.rerun()
+            else:
+                st.error("パスコードが一致しません。")
+
+keep_images_val = st.toggle("画像もZIPに同梱する", value=st.session_state["keep_images"])
+if keep_images_val != st.session_state["keep_images"]:
+    st.session_state["keep_images"] = keep_images_val
+    if not keep_images_val:
+        st.session_state["saved_images"] = {}
+    st.session_state["export_dirty"] = True
+
+total_records = len(st.session_state["records"])
+warn_threshold = WARN_LIMIT_WITH_IMAGES if st.session_state["keep_images"] else WARN_LIMIT_TEXT_ONLY
+if total_records >= warn_threshold:
+    st.warning(f"現在 {total_records} 件登録されています。保存してください。")
+
+tab_input, tab_export = st.tabs([f"登録 ({total_records})", "出力"])
+
+with tab_input:
+    allowed = st.session_state["is_pro"] or (total_records < FREE_TRIAL_LIMIT)
+    if not allowed:
+        st.warning(f"無料お試し枠（{FREE_TRIAL_LIMIT}件）に達しました。続けて利用するにはPro購入をご検討ください。")
+    else:
+        apply_camera_capture_preference()
+
+        cam_file = st.file_uploader(
+            "撮影",
+            type=["jpg", "jpeg", "png", "webp", "heic"],
+            accept_multiple_files=False,
+            key=f"cam_up_{st.session_state['cam_key']}",
+        )
+        if cam_file is not None:
+            raw_check = cam_file.getvalue()
+            if raw_check:
+                f_digest = hashlib.sha256(raw_check).hexdigest()
+                if f_digest not in st.session_state["processed_hashes"]:
+                    with st.spinner(f"解析中: {cam_file.name}"):
+                        try:
+                            register_file(cam_file)
+                        except Exception as exc:
+                            st.session_state["last_status"] = ("error", f"{cam_file.name}: {exc}")
+            st.session_state["cam_key"] += 1
+            st.rerun()
+
+        picked_files = st.file_uploader(
+            "画像・PDFを選ぶ",
+            type=["jpg", "jpeg", "png", "webp", "heic", "pdf"],
+            accept_multiple_files=True,
+            key=f"up_{st.session_state['up_key']}",
+        )
+        if picked_files:
+            processed_any = False
+            for f in picked_files:
+                raw_check = f.getvalue()
+                if not raw_check:
+                    continue
+                f_digest = hashlib.sha256(raw_check).hexdigest()
+                if f_digest in st.session_state["processed_hashes"]:
+                    continue
+                if not st.session_state["is_pro"] and len(st.session_state["records"]) >= FREE_TRIAL_LIMIT:
+                    st.session_state["last_status"] = ("warning", f"無料お試し枠（{FREE_TRIAL_LIMIT}件）に達しました。")
+                    break
+                with st.spinner(f"解析中: {f.name}"):
+                    try:
+                        register_file(f)
+                        processed_any = True
+                    except Exception as exc:
+                        st.session_state["last_status"] = ("error", f"{f.name}: {exc}")
+            if processed_any:
+                st.session_state["up_key"] += 1
+                st.rerun()
+
+    if st.session_state["last_status"]:
+        level, text = st.session_state["last_status"]
+        if level == "success":
+            st.success(text)
+        elif level == "warning":
+            st.warning(text)
+        else:
+            st.error(text)
+
+with tab_export:
+    if not st.session_state["records"]:
+        st.info("データがありません。")
+    else:
+        if st.session_state["export_dirty"] or (
+            st.session_state["excel_bytes"] is None
+            and st.session_state["zip_bytes"] is None
+        ):
+            rebuild_export_files()
+
+        df_view = pd.DataFrame(st.session_state["records"])
+        sum_amount = int(pd.to_numeric(df_view["税込金額"], errors="coerce").fillna(0).sum())
+        col1, col2 = st.columns(2)
+        col1.metric("件数", f"{len(df_view)}")
+        col2.metric("合計", f"¥{sum_amount:,}")
+
+        edited = st.data_editor(
+            df_view,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="detail_editor",
+        )
+        if not edited.equals(df_view):
+            st.session_state["records"] = edited.to_dict(orient="records")
+            rebuild_export_files()
+
+        if st.session_state["keep_images"] and st.session_state["zip_bytes"]:
+            st.download_button(
+                label="ZIP一括ダウンロード",
+                data=st.session_state["zip_bytes"],
+                file_name=st.session_state["zip_name"],
+                mime="application/zip",
+                use_container_width=True,
+            )
+        elif st.session_state["excel_bytes"]:
+            st.download_button(
+                label="Excelダウンロード (.xlsx)",
+                data=st.session_state["excel_bytes"],
+                file_name=st.session_state["excel_name"],
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+        if st.button("データクリア", use_container_width=True):
+            st.session_state["records"] = []
+            st.session_state["saved_images"] = {}
+            st.session_state["processed_hashes"] = set()
+            st.session_state["zip_bytes"] = None
+            st.session_state["zip_name"] = ""
+            st.session_state["excel_bytes"] = None
+            st.session_state["excel_name"] = ""
+            st.session_state["export_dirty"] = False
+            st.session_state["last_status"] = ("warning", "クリアしました。")
+            st.rerun()
