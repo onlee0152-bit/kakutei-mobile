@@ -82,6 +82,7 @@ def init_session():
         "excel_bytes": None,
         "excel_name": "",
         "export_dirty": False,
+        "up_key": 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -398,12 +399,13 @@ with tab_input:
         st.warning(f"無料お試し枠（{FREE_TRIAL_LIMIT}件）に達しました。続けて利用するにはPro購入をご検討ください。")
     else:
         picked_files = st.file_uploader(
-            "画像・PDFをアップロード（写真選択・撮影ファイル・PDF対応）",
+            "画像・PDFをアップロード（続けて撮影・選択できます）",
             type=["jpg", "jpeg", "png", "webp", "heic", "pdf"],
             accept_multiple_files=True,
-            key="up_fixed",
+            key=f"up_{st.session_state['up_key']}",
         )
         if picked_files:
+            processed_any = False
             for f in picked_files:
                 raw_check = f.getvalue()
                 if not raw_check:
@@ -417,8 +419,12 @@ with tab_input:
                 with st.spinner(f"解析中: {f.name}"):
                     try:
                         register_file(f)
+                        processed_any = True
                     except Exception as exc:
                         st.session_state["last_status"] = ("error", f"{f.name}: {exc}")
+            if processed_any:
+                st.session_state["up_key"] += 1
+                st.rerun()
 
     if st.session_state["last_status"]:
         level, text = st.session_state["last_status"]
