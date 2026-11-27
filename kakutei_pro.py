@@ -97,10 +97,13 @@ ACCOUNT_CATEGORIES = [
 
 
 def get_secret(key: str, fallback: str = "") -> str:
-    val = st.secrets.get(key, "")
-    if not val and fallback:
-        val = st.secrets.get(fallback, "")
-    return str(val).strip()
+    try:
+        val = st.secrets.get(key, "")
+        if not val and fallback:
+            val = st.secrets.get(fallback, "")
+        return str(val).strip()
+    except Exception:
+        return ""
 
 
 def normalize_email(email: str) -> str:
@@ -110,7 +113,7 @@ def normalize_email(email: str) -> str:
 def get_monitor_emails() -> set[str]:
     raw_items = []
     for k in ("MONITOR_EMAILS", "ALLOWLIST_EMAILS", "TEST_EMAILS"):
-        v = str(st.secrets.get(k, "")).strip()
+        v = get_secret(k)
         if v:
             raw_items.append(v)
     emails = set()
@@ -125,7 +128,7 @@ def get_monitor_emails() -> set[str]:
 def get_valid_passcodes() -> list[str]:
     raw_items = []
     for k in ("PRO_PASSCODES", "PRO_PASSCODE", "ACCESS_CODE"):
-        v = str(st.secrets.get(k, "")).strip()
+        v = get_secret(k)
         if v:
             raw_items.append(v)
     codes = []
@@ -165,10 +168,6 @@ def init_session():
 
 
 def verify_email_subscription(email: str) -> tuple[bool, str, str]:
-    """
-    入力されたメールアドレスがモニター許可リストまたはStripeの有効な定期購読に該当するか確認する。
-    戻り値: (is_valid, plan_label, message)
-    """
     em = normalize_email(email)
     if not em or "@" not in em:
         return False, "", "有効なメールアドレスを入力してください。"
@@ -295,7 +294,11 @@ def sync_pro_status():
             )
         return
 
-    query_email = normalize_email(st.query_params.get("email", ""))
+    try:
+        query_email = normalize_email(st.query_params.get("email", ""))
+    except Exception:
+        query_email = ""
+
     if query_email:
         ok, label, _ = verify_email_subscription(query_email)
         if ok:
@@ -629,4 +632,134 @@ else:
                 else:
                     st.error("パスコードが一致しません。")
 
-keep_images_val
+keep_images_val = st.toggle("画像もZIPに同梱する", value=st.session_state["keep_images"])
+if keep_images_val != st.session_state["keep_images"]:
+    st.session_state["keep_images"] = keep_images_val
+    if not keep_images_val:
+        st.session_state["saved_images"] = {}
+    st.session_state["export_dirty"] = True
+
+total_records = len(st.session_state["records"])
+warn_threshold = WARN_LIMIT_WITH_IMAGES if st.session_state["keep_images"] else WARN_LIMIT_TEXT_ONLY
+if total_records >= warn_threshold:
+    st.warning(f"現在 {total_records} 件登録されています。保存してください。")
+
+tab_input, tab_export = st.tabs([f"登録 ({total_records})", "出力"])
+
+with tab_input:
+    allowed = st.session_state["is_pro"] or (total_records < FREE_TRIAL_LIMIT)
+    if not allowed:
+        st.warning(f"無料お試し枠（{FREE_TRIAL_LIMIT}件）に達しました。続けて利用するにはPro購入をご検討ください。")
+    else:
+        apply_camera_capture_preference()
+
+        cam_file = st.file_uploader(
+            "撮影",
+            type=["jpg", "jpeg", "png", "webp", "heic"],
+            accept_multiple_files=False,
+            key=f"cam_up_{st.session_state['cam_key']}",
+        )
+        if cam_file is not None:
+            raw_check = cam_file.getvalue()
+            if raw_check:
+                f_digest = hashlib.sha256(raw_check).hexdigest()
+                if f_digest not in st.session_state["processed_hashes"]:
+                    with st.spinner(f"解析中: {cam_file.name}"):
+                        try:
+                            register_file(cam_file)
+                        except Exception as exc:
+                            st.session_state["last_status"] = ("error", f"{cam_file.name}: {exc}")
+            st.session_state["cam_key"] += 1
+            st.rerun()
+
+        picked_files = st.file_uploader(
+            "画像・PDFを選ぶ",
+            type=["jpg", "jpeg", "png", "webp", "heic", "pdf"],
+            accept_multiple_files=True,
+            key=f"up_{st.session_state['up_key']}",
+        )
+        if picked_files:
+            processed_any = False
+            for f in picked_files:
+                raw_check = f.getvalue()
+                if not raw_check:
+                    continue
+                f_digest = hashlib.sha256(raw_check).hexdigest()
+                if f_digest in st.session_state["processed_hashes"]:
+                    continue
+                if not st.session_state["is_pro"] and len(st.session_state["records"]) >= FREE_TRIAL_LIMIT:
+                    st.session_state["last_status"] = ("warning", f"無料お試し枠（{FREE_TRIAL_LIMIT}件）に達しました。")
+                    break
+                with st.spinner(f"解析中: {f.name}"):
+                    try:
+                        register_file(f)
+                        processed_any = True
+                    except Exception as exc:
+                        st.session_state["last_status"] = ("error", f"{f.name}: {exc}")
+            if processed_any:
+                st.session_state["up_key"] += 1
+                st.rerun()
+
+    if st.session_state["last_status"]:
+        level, text = st.session_state["last_status"]
+        if level == "success":
+            st.success(text)
+        elif level == "warning":
+            st.warning(text)
+        else:
+            st.error(text)
+
+with tab_export:
+    if not st.session_state["records"]:
+        st.info("データがありません。")
+    else:
+        if st.session_state["export_dirty"] or (
+            st.session_state["excel_bytes"] is None
+            and st.session_state["zip_bytes"] is None
+        ):
+            rebuild_export_files()
+
+        df_view = pd.DataFrame(st.session_state["records"])
+        sum_amount = int(pd.to_numeric(df_view["税込金額"], errors="coerce").fillna(0).sum())
+        col1, col2 = st.columns(2)
+        col1.metric("件数", f"{len(df_view)}")
+        col2.metric("合計", f"¥{sum_amount:,}")
+
+        edited = st.data_editor(
+            df_view,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="detail_editor",
+        )
+        if not edited.equals(df_view):
+            st.session_state["records"] = edited.to_dict(orient="records")
+            rebuild_export_files()
+
+        if st.session_state["keep_images"] and st.session_state["zip_bytes"]:
+            st.download_button(
+                label="ZIP一括ダウンロード",
+                data=st.session_state["zip_bytes"],
+                file_name=st.session_state["zip_name"],
+                mime="application/zip",
+                use_container_width=True,
+            )
+        elif st.session_state["excel_bytes"]:
+            st.download_button(
+                label="Excelダウンロード (.xlsx)",
+                data=st.session_state["excel_bytes"],
+                file_name=st.session_state["excel_name"],
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+        if st.button("データクリア", use_container_width=True):
+            st.session_state["records"] = []
+            st.session_state["saved_images"] = {}
+            st.session_state["processed_hashes"] = set()
+            st.session_state["zip_bytes"] = None
+            st.session_state["zip_name"] = ""
+            st.session_state["excel_bytes"] = None
+            st.session_state["excel_name"] = ""
+            st.session_state["export_dirty"] = False
+            st.session_state["last_status"] = ("warning", "クリアしました。")
+            st.rerun()
