@@ -1,14 +1,20 @@
+import hashlib
+import io
+import json
+import zipfile
+from datetime import datetime
+
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-import pandas as pd
-import io
-import zipfile
-import json
-import hashlib
-from datetime import datetime
-from PIL import Image, ImageOps
 from google import genai
 from google.genai import types
+from PIL import Image, ImageOps
+
+try:
+    import stripe
+except ImportError:
+    stripe = None
 
 st.set_page_config(
     page_title="撮るだけ確定申告 Pro",
@@ -97,6 +103,25 @@ def get_secret(key: str, fallback: str = "") -> str:
     return str(val).strip()
 
 
+def normalize_email(email: str) -> str:
+    return str(email or "").strip().lower()
+
+
+def get_monitor_emails() -> set[str]:
+    raw_items = []
+    for k in ("MONITOR_EMAILS", "ALLOWLIST_EMAILS", "TEST_EMAILS"):
+        v = str(st.secrets.get(k, "")).strip()
+        if v:
+            raw_items.append(v)
+    emails = set()
+    for chunk in raw_items:
+        for part in chunk.replace("\n", ",").split(","):
+            em = normalize_email(part)
+            if em:
+                emails.add(em)
+    return emails
+
+
 def get_valid_passcodes() -> list[str]:
     raw_items = []
     for k in ("PRO_PASSCODES", "PRO_PASSCODE", "ACCESS_CODE"):
@@ -112,13 +137,15 @@ def get_valid_passcodes() -> list[str]:
     return codes
 
 
-def pro_token(code: str) -> str:
-    return hashlib.sha256(f"kakutei_pro_v1:{code}".encode("utf-8")).hexdigest()
+def email_token(email: str) -> str:
+    return hashlib.sha256(f"kakutei_pro_email_v1:{normalize_email(email)}".encode("utf-8")).hexdigest()
 
 
 def init_session():
     defaults = {
         "is_pro": False,
+        "pro_email": "",
+        "pro_plan_label": "",
         "records": [],
         "saved_images": {},
         "keep_images": False,
@@ -135,6 +162,174 @@ def init_session():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+
+def verify_email_subscription(email: str) -> tuple[bool, str, str]:
+    """
+    入力されたメールアドレスがモニター許可リストまたはStripeの有効な定期購読に該当するか確認する。
+    戻り値: (is_valid, plan_label, message)
+    """
+    em = normalize_email(email)
+    if not em or "@" not in em:
+        return False, "", "有効なメールアドレスを入力してください。"
+
+    if em in get_monitor_emails():
+        return True, "モニター／テスト枠", f"モニター許可リストで確認しました（{em}）。"
+
+    api_key = get_secret("STRIPE_SECRET_KEY")
+    if not api_key:
+        return False, "", "現在、定期購読の自動照合キーが設定されていません。モニター許可リストまたはパスコードをご確認ください。"
+
+    if stripe is None:
+        return False, "", "stripe ライブラリがインストールされていません。requirements.txt に stripe を追加してください。"
+
+    try:
+        stripe.api_key = api_key
+        customers = stripe.Customer.list(email=em, limit=20)
+        customer_data = getattr(customers, "data", []) or []
+
+        for cust in customer_data:
+            cust_id = cust.get("id") if isinstance(cust, dict) else getattr(cust, "id", None)
+            if not cust_id:
+                continue
+            subs = stripe.Subscription.list(customer=cust_id, status="all", limit=20)
+            sub_data = getattr(subs, "data", []) or []
+            for sub in sub_data:
+                status = sub.get("status") if isinstance(sub, dict) else getattr(sub, "status", "")
+                if status in ("active", "trialing"):
+                    label = "Pro版有効中（年額定期購読）" if status == "active" else "Pro版有効中（トライアル中）"
+                    return True, label, f"Stripeの有効な契約を確認しました（{em}）。"
+
+        return False, "", "このメールアドレスで有効な定期購読（active）が見つかりませんでした。"
+    except Exception as exc:
+        return False, "", f"Stripe照合中にエラーが発生しました: {exc}"
+
+
+def save_pro_session(email: str, plan_label: str):
+    em = normalize_email(email)
+    token = email_token(em)
+    st.session_state["is_pro"] = True
+    st.session_state["pro_email"] = em
+    st.session_state["pro_plan_label"] = plan_label
+
+    try:
+        st.query_params["pro_user"] = token
+    except Exception:
+        pass
+
+    payload = json.dumps({"email": em, "token": token})
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const rawPayload = {json.dumps(payload)};
+            try {{
+                localStorage.setItem("kakutei_pro_auth", rawPayload);
+                if (window.parent && window.parent.localStorage) {{
+                    window.parent.localStorage.setItem("kakutei_pro_auth", rawPayload);
+                }}
+            }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def clear_pro_session(reset_browser: bool = True):
+    st.session_state["is_pro"] = False
+    st.session_state["pro_email"] = ""
+    st.session_state["pro_plan_label"] = ""
+
+    if not reset_browser:
+        return
+
+    try:
+        for k in ("pro", "code", "pro_user", "email"):
+            if k in st.query_params:
+                del st.query_params[k]
+    except Exception:
+        pass
+
+    components.html(
+        """
+        <script>
+        (function() {
+            try {
+                localStorage.removeItem("kakutei_pro_auth");
+                localStorage.removeItem("kakutei_pro_token");
+                if (window.parent && window.parent.localStorage) {
+                    window.parent.localStorage.removeItem("kakutei_pro_auth");
+                    window.parent.localStorage.removeItem("kakutei_pro_token");
+                }
+                const parentWin = window.parent || window;
+                const url = new URL(parentWin.location.href);
+                let changed = false;
+                ["pro", "code", "pro_user", "email"].forEach(function(param) {
+                    if (url.searchParams.has(param)) {
+                        url.searchParams.delete(param);
+                        changed = true;
+                    }
+                });
+                if (changed) {
+                    parentWin.history.replaceState(null, "", url.toString());
+                }
+            } catch (e) {}
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+def sync_pro_status():
+    if st.session_state.get("is_pro") and st.session_state.get("pro_email"):
+        ok, label, _ = verify_email_subscription(st.session_state["pro_email"])
+        if ok:
+            st.session_state["pro_plan_label"] = label
+        else:
+            clear_pro_session(reset_browser=True)
+            st.session_state["last_status"] = (
+                "warning",
+                "定期購読の有効期限切れ・解約またはモニター対象外となったため、無料お試し枠に戻りました。",
+            )
+        return
+
+    query_email = normalize_email(st.query_params.get("email", ""))
+    if query_email:
+        ok, label, _ = verify_email_subscription(query_email)
+        if ok:
+            save_pro_session(query_email, label)
+            return
+
+    components.html(
+        """
+        <script>
+        (function() {
+            try {
+                const raw = localStorage.getItem("kakutei_pro_auth") ||
+                    (window.parent && window.parent.localStorage ? window.parent.localStorage.getItem("kakutei_pro_auth") : "");
+                if (!raw) return;
+                const parsed = JSON.parse(raw);
+                if (parsed && parsed.email) {
+                    const parentWin = window.parent || window;
+                    const url = new URL(parentWin.location.href);
+                    if (url.searchParams.get("email") !== parsed.email) {
+                        url.searchParams.set("email", parsed.email);
+                        parentWin.history.replaceState(null, "", url.toString());
+                        parentWin.location.reload();
+                    }
+                }
+            } catch (e) {}
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+init_session()
+sync_pro_status()
 
 
 def apply_camera_capture_preference():
@@ -187,132 +382,6 @@ def apply_camera_capture_preference():
         """,
         height=0,
     )
-
-
-def save_pro_to_browser(code: str):
-    if not code:
-        return
-    token = pro_token(code)
-    try:
-        st.query_params["pro"] = token
-    except Exception:
-        pass
-    components.html(
-        f"""
-        <script>
-        (function() {{
-            const token = "{token}";
-            try {{
-                localStorage.setItem("kakutei_pro_token", token);
-                if (window.parent && window.parent.localStorage) {{
-                    window.parent.localStorage.setItem("kakutei_pro_token", token);
-                }}
-            }} catch (e) {{}}
-        }})();
-        </script>
-        """,
-        height=0,
-    )
-
-
-def clear_pro_from_browser():
-    try:
-        if "pro" in st.query_params:
-            del st.query_params["pro"]
-        if "code" in st.query_params:
-            del st.query_params["code"]
-    except Exception:
-        pass
-    components.html(
-        """
-        <script>
-        (function() {
-            try {
-                localStorage.removeItem("kakutei_pro_token");
-                if (window.parent && window.parent.localStorage) {
-                    window.parent.localStorage.removeItem("kakutei_pro_token");
-                }
-                const parentWin = window.parent || window;
-                const url = new URL(parentWin.location.href);
-                if (url.searchParams.has("pro") || url.searchParams.has("code")) {
-                    url.searchParams.delete("pro");
-                    url.searchParams.delete("code");
-                    parentWin.history.replaceState(null, "", url.toString());
-                }
-            } catch (e) {}
-        })();
-        </script>
-        """,
-        height=0,
-    )
-
-
-def restore_pro_from_browser(valid_tokens: list[str]):
-    if st.session_state.get("is_pro") or not valid_tokens:
-        return
-    tokens_json = json.dumps(valid_tokens)
-    components.html(
-        f"""
-        <script>
-        (function() {{
-            const validTokens = {tokens_json};
-            try {{
-                const saved = localStorage.getItem("kakutei_pro_token") ||
-                    (window.parent && window.parent.localStorage ? window.parent.localStorage.getItem("kakutei_pro_token") : "");
-                if (saved && validTokens.includes(saved)) {{
-                    const parentWin = window.parent || window;
-                    const url = new URL(parentWin.location.href);
-                    if (url.searchParams.get("pro") !== saved) {{
-                        url.searchParams.set("pro", saved);
-                        parentWin.history.replaceState(null, "", url.toString());
-                        parentWin.location.reload();
-                    }}
-                }} else if (saved && !validTokens.includes(saved)) {{
-                    localStorage.removeItem("kakutei_pro_token");
-                    if (window.parent && window.parent.localStorage) {{
-                        window.parent.localStorage.removeItem("kakutei_pro_token");
-                    }}
-                }}
-            }} catch (e) {{}}
-        }})();
-        </script>
-        """,
-        height=0,
-    )
-
-
-def sync_pro_status():
-    valid_codes = get_valid_passcodes()
-    if not valid_codes:
-        st.session_state["is_pro"] = True
-        return
-
-    token_to_code = {pro_token(c): c for c in valid_codes}
-    valid_tokens = list(token_to_code.keys())
-
-    query_pro = str(st.query_params.get("pro", "")).strip()
-    query_code = str(st.query_params.get("code", "")).strip()
-
-    if query_pro:
-        if query_pro in token_to_code:
-            st.session_state["is_pro"] = True
-            save_pro_to_browser(token_to_code[query_pro])
-        else:
-            st.session_state["is_pro"] = False
-            clear_pro_from_browser()
-    elif query_code:
-        if query_code in valid_codes:
-            st.session_state["is_pro"] = True
-            save_pro_to_browser(query_code)
-        else:
-            st.session_state["is_pro"] = False
-            clear_pro_from_browser()
-    elif not st.session_state.get("is_pro"):
-        restore_pro_from_browser(valid_tokens)
-
-
-init_session()
-sync_pro_status()
 
 
 def optimize_image(file_bytes: bytes, max_px: int = 1200, quality: int = 72) -> bytes:
@@ -508,161 +577,56 @@ st.markdown("### 撮るだけ確定申告 Pro")
 st.caption("レシート入力・仕分けの下書きを最速で終わらせる相棒")
 
 if st.session_state["is_pro"]:
-    st.caption("Pro版有効中（年額プラン）")
+    email_disp = st.session_state.get("pro_email", "")
+    status_text = st.session_state.get("pro_plan_label") or "Pro版有効中"
+    st.caption(f"{status_text}（{email_disp}）" if email_disp else status_text)
     portal_url = get_secret("STRIPE_PORTAL_URL")
-    if portal_url:
-        with st.expander("ご契約管理・解約手続き"):
+    with st.expander("ご契約管理・解約 / 認証解除"):
+        if portal_url:
             st.caption("契約内容の確認・お支払い方法の変更・解約（退会）はこちら")
             st.link_button("契約管理・解約画面を開く", portal_url, use_container_width=True)
+        if st.button("認証を解除する", use_container_width=True):
+            clear_pro_session(reset_browser=True)
+            st.session_state["last_status"] = ("warning", "Pro認証を解除しました。")
+            st.rerun()
 else:
     used_count = len(st.session_state["records"])
     rem_count = max(0, FREE_TRIAL_LIMIT - used_count)
     st.caption(f"無料お試し 残り {rem_count}/{FREE_TRIAL_LIMIT} 件")
-    with st.expander("Pro購入 / パスコード入力", expanded=(rem_count == 0)):
+    with st.expander("Pro購入 / メールアドレス・パスコード認証", expanded=(rem_count == 0)):
         st.caption("年額 3,960円（税込／月あたり 330円相当・毎年自動更新）")
         stripe_url = get_secret("STRIPE_URL", "STRIPE_PAYMENT_LINK")
         if stripe_url:
             st.link_button("Pro購入（年額 3,960円・税込）", stripe_url, use_container_width=True)
-        entered_code = st.text_input("パスコード", type="password", key="unlock_code_input")
-        if st.button("パスコードを有効化", use_container_width=True):
-            valid_codes = get_valid_passcodes()
-            entered = entered_code.strip()
-            if valid_codes and entered in valid_codes:
-                st.session_state["is_pro"] = True
-                save_pro_to_browser(entered)
-                st.session_state["last_status"] = ("success", "Pro版を有効化しました。")
+
+        st.caption("① 決済時のメールアドレス（またはモニター登録済みアドレス）で有効化：")
+        entered_email = st.text_input(
+            "メールアドレス",
+            placeholder="name@example.com",
+            key="pro_email_input",
+        )
+        if st.button("メールアドレスで確認して有効化", use_container_width=True):
+            with st.spinner("契約状況を確認中..."):
+                ok, plan_label, msg = verify_email_subscription(entered_email)
+            if ok:
+                save_pro_session(entered_email, plan_label)
+                st.session_state["last_status"] = ("success", msg)
                 st.rerun()
             else:
-                st.error("パスコードが一致しません。")
+                st.error(msg)
 
-keep_images_val = st.toggle("画像もZIPに同梱する", value=st.session_state["keep_images"])
-if keep_images_val != st.session_state["keep_images"]:
-    st.session_state["keep_images"] = keep_images_val
-    if not keep_images_val:
-        st.session_state["saved_images"] = {}
-    st.session_state["export_dirty"] = True
+        valid_codes = get_valid_passcodes()
+        if valid_codes:
+            st.caption("② パスコードで有効化：")
+            entered_code = st.text_input("パスコード", type="password", key="unlock_code_input")
+            if st.button("パスコードを有効化", use_container_width=True):
+                if entered_code.strip() in valid_codes:
+                    st.session_state["is_pro"] = True
+                    st.session_state["pro_email"] = ""
+                    st.session_state["pro_plan_label"] = "Pro版有効中（パスコード認証）"
+                    st.session_state["last_status"] = ("success", "Pro版を有効化しました。")
+                    st.rerun()
+                else:
+                    st.error("パスコードが一致しません。")
 
-total_records = len(st.session_state["records"])
-warn_threshold = WARN_LIMIT_WITH_IMAGES if st.session_state["keep_images"] else WARN_LIMIT_TEXT_ONLY
-if total_records >= warn_threshold:
-    st.warning(f"現在 {total_records} 件登録されています。保存してください。")
-
-tab_input, tab_export = st.tabs([f"登録 ({total_records})", "出力"])
-
-with tab_input:
-    allowed = st.session_state["is_pro"] or (total_records < FREE_TRIAL_LIMIT)
-    if not allowed:
-        st.warning(f"無料お試し枠（{FREE_TRIAL_LIMIT}件）に達しました。続けて利用するにはPro購入をご検討ください。")
-    else:
-        apply_camera_capture_preference()
-
-        cam_file = st.file_uploader(
-            "撮影",
-            type=["jpg", "jpeg", "png", "webp", "heic"],
-            accept_multiple_files=False,
-            key=f"cam_up_{st.session_state['cam_key']}",
-        )
-        if cam_file is not None:
-            raw_check = cam_file.getvalue()
-            if raw_check:
-                f_digest = hashlib.sha256(raw_check).hexdigest()
-                if f_digest not in st.session_state["processed_hashes"]:
-                    with st.spinner(f"解析中: {cam_file.name}"):
-                        try:
-                            register_file(cam_file)
-                        except Exception as exc:
-                            st.session_state["last_status"] = ("error", f"{cam_file.name}: {exc}")
-            st.session_state["cam_key"] += 1
-            st.rerun()
-
-        picked_files = st.file_uploader(
-            "画像・PDFを選ぶ",
-            type=["jpg", "jpeg", "png", "webp", "heic", "pdf"],
-            accept_multiple_files=True,
-            key=f"up_{st.session_state['up_key']}",
-        )
-        if picked_files:
-            processed_any = False
-            for f in picked_files:
-                raw_check = f.getvalue()
-                if not raw_check:
-                    continue
-                f_digest = hashlib.sha256(raw_check).hexdigest()
-                if f_digest in st.session_state["processed_hashes"]:
-                    continue
-                if not st.session_state["is_pro"] and len(st.session_state["records"]) >= FREE_TRIAL_LIMIT:
-                    st.session_state["last_status"] = ("warning", f"無料お試し枠（{FREE_TRIAL_LIMIT}件）に達しました。")
-                    break
-                with st.spinner(f"解析中: {f.name}"):
-                    try:
-                        register_file(f)
-                        processed_any = True
-                    except Exception as exc:
-                        st.session_state["last_status"] = ("error", f"{f.name}: {exc}")
-            if processed_any:
-                st.session_state["up_key"] += 1
-                st.rerun()
-
-    if st.session_state["last_status"]:
-        level, text = st.session_state["last_status"]
-        if level == "success":
-            st.success(text)
-        elif level == "warning":
-            st.warning(text)
-        else:
-            st.error(text)
-
-with tab_export:
-    if not st.session_state["records"]:
-        st.info("データがありません。")
-    else:
-        if st.session_state["export_dirty"] or (
-            st.session_state["excel_bytes"] is None
-            and st.session_state["zip_bytes"] is None
-        ):
-            rebuild_export_files()
-
-        df_view = pd.DataFrame(st.session_state["records"])
-        sum_amount = int(pd.to_numeric(df_view["税込金額"], errors="coerce").fillna(0).sum())
-        col1, col2 = st.columns(2)
-        col1.metric("件数", f"{len(df_view)}")
-        col2.metric("合計", f"¥{sum_amount:,}")
-
-        edited = st.data_editor(
-            df_view,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="detail_editor",
-        )
-        if not edited.equals(df_view):
-            st.session_state["records"] = edited.to_dict(orient="records")
-            rebuild_export_files()
-
-        if st.session_state["keep_images"] and st.session_state["zip_bytes"]:
-            st.download_button(
-                label="ZIP一括ダウンロード",
-                data=st.session_state["zip_bytes"],
-                file_name=st.session_state["zip_name"],
-                mime="application/zip",
-                use_container_width=True,
-            )
-        elif st.session_state["excel_bytes"]:
-            st.download_button(
-                label="Excelダウンロード (.xlsx)",
-                data=st.session_state["excel_bytes"],
-                file_name=st.session_state["excel_name"],
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-
-        if st.button("データクリア", use_container_width=True):
-            st.session_state["records"] = []
-            st.session_state["saved_images"] = {}
-            st.session_state["processed_hashes"] = set()
-            st.session_state["zip_bytes"] = None
-            st.session_state["zip_name"] = ""
-            st.session_state["excel_bytes"] = None
-            st.session_state["excel_name"] = ""
-            st.session_state["export_dirty"] = False
-            st.session_state["last_status"] = ("warning", "クリアしました。")
-            st.rerun()
+keep_images_val
